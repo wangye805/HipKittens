@@ -688,4 +688,73 @@ __device__ inline static void store(ST &dst, const RT &src) {
     }
 }
 
+// Load a col-major (K-major) fp8e4m3 ST into a row_layout RT using ds_read_b64_tr_b8.
+// ST has shape [K, M_full] (rows=K=RT::cols, cols>=RT::rows) deposited with st_16x128_s swizzle.
+// col_offset: starting M-col in ST (e.g. warp_m * REG_M). Must be a multiple of 8.
+// Produces the same register layout as V_MFMA_SCALE_F32_16X16X128_F8F6F4 expects for A:
+//   lane l gets M-col (col_offset + N*16 + l%16), K-range [(l/16)*32 : +32].
+//
+// Barrier discipline (matches kittens::load for ds_read_b128):
+//   Caller provides s_waitcnt lgkmcnt(0) after this call; no internal barrier.
+//   Four DS reads per N-tile are issued in one asm block with 4 distinct "=v"(float2*)
+//   output operands — compiler binds each directly to a tile VGPR pair (no staging,
+//   no v_mov). j=0,1 use addr VGPRs a0,a1; j=2,3 reuse them with "i"(4*subtile_bytes)
+//   compile-time offset so data[4..7] reads k+64 subtile (matching kittens::load stride-1).
+//   Verified on gfx950 (MI355): zero scratch_store, zero v_mov in .s file.
+template<ducks::rt::row_layout RT, ducks::st::all ST>
+__device__ inline static void load_col(RT &dst, const ST &src, int col_offset = 0) {
+    static_assert(std::is_same_v<typename RT::dtype, fp8e4m3_4>,
+                  "load_col only supports fp8e4m3");
+    static_assert(RT::cols == ST::rows,
+                  "load_col: ST.rows must equal RT::cols (K dimension)");
+    static_assert(RT::width == 1, "load_col: only width==1 supported");
+
+    const int laneid   = kittens::laneid();
+    const int block_id = laneid / 16;   // 0..3: K-band = [block_id*32 : +32]
+    const int l_within = laneid % 16;
+    const int tr_k_grp = l_within / 2; // 0..7: K-row within the 8-row patch
+    const int m_half   = l_within & 1; // 0 or 1: selects M-col byte group 0 or 8
+
+    const uint32_t src_ptr      = (uint32_t)(uintptr_t)(&src.data[0]);
+    constexpr int subtile_bytes = ST::underlying_subtile_bytes; // 2048 for st_16x128_s fp8
+
+    #pragma unroll
+    for (int N = 0; N < RT::height; N++) {
+        const int m_col = col_offset + N * RT::base_tile_rows + m_half * 8;
+
+        // K-stride 0 (data[0..3]): subtile=block_id,   k_within=tr_k_grp / tr_k_grp+8
+        // K-stride 1 (data[4..7]): subtile=block_id+4, k_within=tr_k_grp / tr_k_grp+8
+        // This matches kittens::load (TN) layout where k-stride 1 reads k+64 cols.
+        //
+        // Single addr VGPR: compute a0, fire first pair, then derive a1 = a0 XOR 1088.
+        // 1088 = (8*128) XOR ((8*128)>>8)<<4 = 1024 XOR 64.
+        // Valid when off0 = tr_k_grp*128 + m_col < 1024, which holds for our tile
+        // geometry (col_offset ≤ 64, RT::height = 4 → off0_max = 1016 < 1024).
+        const int subtile_base = block_id;
+        uint32_t addr = src_ptr
+                      + (uint32_t)(subtile_base * subtile_bytes)
+                      + src.swizzle({tr_k_grp, m_col});
+
+        asm volatile(
+            "ds_read_b64_tr_b8 %0, %2 offset:0\n"
+            "ds_read_b64_tr_b8 %1, %2 offset:%3\n"
+            : "=&v"(*reinterpret_cast<float2*>(&dst.tiles[N][0].data[0])),
+              "=&v"(*reinterpret_cast<float2*>(&dst.tiles[N][0].data[4]))
+            : "v"(addr), "i"(4 * subtile_bytes)
+            : "memory"
+        );
+
+        addr ^= 1088u;  // a0 → a1: one v_xor_b32, addr now points to tr_k_grp+8 row
+
+        asm volatile(
+            "ds_read_b64_tr_b8 %0, %2 offset:0\n"
+            "ds_read_b64_tr_b8 %1, %2 offset:%3\n"
+            : "=&v"(*reinterpret_cast<float2*>(&dst.tiles[N][0].data[2])),
+              "=&v"(*reinterpret_cast<float2*>(&dst.tiles[N][0].data[6]))
+            : "v"(addr), "i"(4 * subtile_bytes)
+            : "memory"
+        );
+    }
+}
+
 } // namespace kittens
