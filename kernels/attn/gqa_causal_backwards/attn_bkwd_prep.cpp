@@ -223,17 +223,76 @@ void dispatch_dq_shuffle(attn_dq_shuffle_globals<D> g) {
     attend_dq_shuffle_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
 }
 
+#ifdef HK_DETERMINISTIC
+// ───────────── deterministic dQ reduce: sum fp32 per-split partials → bf16 ─────────────
+// dQ_acc is [nsplit*B, H, N, D] fp32 (leading = split*B + batch). Reduce over the nsplit
+// splits in fixed order → cast bf16 → dQg_in ([B,H,N,D], the layout dq_shuffle reads).
+// Fixed accumulation order ⇒ bitwise-reproducible dQ. (Full sum incl. causal zeros; a
+// bounded-split version is a later optimization.)
+template<int D> struct attn_dq_reduce_globals {
+    gl<float, -1, -1, -1, -1> dQ_acc;   // [nsplit*B, H, N, D]
+    gl<bf16,  -1, -1, -1, -1> dQg_in;   // [B, H, N, D]
+    hipStream_t stream;
+    dim3 grid()  { return dim3(4096); }
+    dim3 block() { return dim3(256); }
+    size_t dynamic_shared_memory() { return 0; }
+};
+
+template<int D> __global__ void attend_dq_reduce_ker(const attn_dq_reduce_globals<D> g) {
+    // Optimized reduce: float4-vectorized loads + causal bounded-split (KV block sp only
+    // contributes to query rows n >= sp*BLOCK_SIZE_KV, so for row n sum sp in [0, n/256] —
+    // skips the ~half of dq_acc that is causal zeros). Fixed sp order ⇒ still deterministic.
+    constexpr int  NSPLIT    = ATTN_N / BLOCK_SIZE_KV;
+    constexpr long HND       = (long)ATTN_H * ATTN_N * D;     // per-batch element span
+    constexpr long total_vec = (long)ATTN_B * HND / 4;        // # of float4 outputs
+    const float* acc = (const float*)&g.dQ_acc[{0, 0, 0, 0}];
+    bf16*        out = (bf16*)       &g.dQg_in[{0, 0, 0, 0}];
+    for (long iv = (long)blockIdx.x * blockDim.x + threadIdx.x; iv < total_vec;
+             iv += (long)gridDim.x * blockDim.x) {
+        const long elem = iv * 4;                 // first fp32 elem index in [0, B*HND)
+        const long b    = elem / HND;
+        const long r    = elem - b * HND;         // within-batch offset (h,n,d), %4==0
+        const int  n    = (int)((r / D) % ATTN_N);// query row
+        int max_sp = n / BLOCK_SIZE_KV;           // causal bound: largest sp with sp*256<=n
+        if (max_sp >= NSPLIT) max_sp = NSPLIT - 1;
+        float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+        for (int sp = 0; sp <= max_sp; ++sp) {
+            const float4 v = *reinterpret_cast<const float4*>(acc + ((long)sp * ATTN_B + b) * HND + r);
+            a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w;
+        }
+        bf16* o = out + (b * HND + r);
+        o[0] = base_types::convertor<bf16, float>::convert(a.x);
+        o[1] = base_types::convertor<bf16, float>::convert(a.y);
+        o[2] = base_types::convertor<bf16, float>::convert(a.z);
+        o[3] = base_types::convertor<bf16, float>::convert(a.w);
+    }
+}
+
+template<int D>
+void dispatch_dq_reduce(attn_dq_reduce_globals<D> g) {
+    attend_dq_reduce_ker<D><<<g.grid(), g.block(), 0, g.stream>>>(g);
+    hipDeviceSynchronize();
+}
+#endif
+
 PYBIND11_MODULE(tk_kernel_bkwd_prep, m) {
     m.doc() = "tk_kernel python module";
 
-    py::bind_function<dispatch_prep<ATTN_D>>(m, "dispatch_prep", 
-        &attn_prep_globals<ATTN_D>::Og, 
+    py::bind_function<dispatch_prep<ATTN_D>>(m, "dispatch_prep",
+        &attn_prep_globals<ATTN_D>::Og,
         &attn_prep_globals<ATTN_D>::dOg,
         &attn_prep_globals<ATTN_D>::delta
     );
 
-    py::bind_function<dispatch_dq_shuffle<ATTN_D>>(m, "dispatch_dq_shuffle", 
+    py::bind_function<dispatch_dq_shuffle<ATTN_D>>(m, "dispatch_dq_shuffle",
         &attn_dq_shuffle_globals<ATTN_D>::dQg_in,
         &attn_dq_shuffle_globals<ATTN_D>::dQg_out
     );
+
+#ifdef HK_DETERMINISTIC
+    py::bind_function<dispatch_dq_reduce<ATTN_D>>(m, "dispatch_dq_reduce",
+        &attn_dq_reduce_globals<ATTN_D>::dQ_acc,
+        &attn_dq_reduce_globals<ATTN_D>::dQg_in
+    );
+#endif
 }

@@ -12,6 +12,11 @@ CPPFLAGS += -DATTN_H=$(ATTN_H)
 CPPFLAGS += -DATTN_H_KV=$(ATTN_H_KV)
 CPPFLAGS += -DATTN_N=$(ATTN_N)
 
+# Deterministic dQ via split+reduce (fp32 dq_acc -> bf16). Build: make HK_DETERMINISTIC=1 ...
+ifdef HK_DETERMINISTIC
+CPPFLAGS += -DHK_DETERMINISTIC
+endif
+
 EXTRA_HIPFLAGS += -DHIP_ENABLE_WARP_SYNC_BUILTINS -ffast-math
 
 include ../../common.mk
