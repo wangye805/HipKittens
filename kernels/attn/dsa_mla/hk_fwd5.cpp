@@ -1,3 +1,8 @@
+// hk_fwd5.cpp — CROSS-TILE SWP attempt (WIP). Carry S_prev; QK(t+1)∥softmax+PV(t) to hide latency.
+// STATUS: correct at nt<=8, but a race/bug at nt=36 (256 bad, mostly deterministic) + spills 28 VGPR (S_prev
+//   +S_cur carry over budget) -> 11ms (SLOWER than hk_fwd4 8.8ms). The latency-hiding could help (my kernel
+//   is latency-bound ~7ms) but only if the spill is removed (register relief) AND the high-nt bug fixed.
+//   Shelved pending register relief. hk_fwd4 = the stable deliverable.
 // hk_fwd4.cpp — DSA V4 sparse-MLA fwd, HK gfx950, SOFTWARE-PIPELINED (toward gluon early-gather 3.03ms).
 // ⚠⚠ WIP / NOT CORRECT YET. The async gather (raw_buffer_load_lds, reverse-swizzle) is VALIDATED in
 // isolation (gcheck), but dropping it into the full kernel trips the codegen KNIFE-EDGE (VGPR=256, 0 spill):
@@ -102,7 +107,7 @@ struct g_t {
 };
 
 __launch_bounds__(NT,1)
-__global__ void hk_fwd4(const g_t g){
+__global__ void hk_fwd5(const g_t g){
     extern __shared__ alignment_dummy __shm[];
     shared_allocator al((int*)&__shm[0]);
     KlS (&ks)[2]  = al.allocate<KlS, 2>();
@@ -133,66 +138,64 @@ __global__ void hk_fwd4(const g_t g){
     typename ST::row_vec m_i, l_i, m_new, alpha;
     neg_infty(m_i); zero(l_i);
 
-    // SINGLE-BUFFER async + EXPLICIT SCHEDULE PINNING (sched_barrier(0) = no reorder across).
-    // Both scalar(stable) and async(unstable) are VGPR=256 -> the knife-edge is the SCHEDULE, not reg count.
-    // Pin the per-tile order so codegen can't wander (HK's control gluon lacks). #define SB to the fence.
+    // CROSS-TILE SWP (gluon early-gather structure). Carry S_prev = QK(tile t); each loop iter does
+    // QK(tile t+1) [MFMA] and softmax+PV(tile t) [VALU+MFMA] as INDEPENDENT work -> they overlap.
+    // late-V (v_l loaded inside softmax_pv, after qk's k_l is dead) keeps VGPR<256 -> stable w/o heavy SB.
     #define SB() __builtin_amdgcn_sched_barrier(0)
-    constexpr int NDMA = gdma<NT,KlS>() + gdma<NT,KrS>();   // DMAs per tile gather (vmcnt units)
-    // prologue: gather tile 0 into buf 0 (async)
-    gather_async<NT>(ks[0],  g.KVg, topk_all,        0,   g.t_kv); SB();
-    gather_async<NT>(krs[0], g.KVg, topk_all,        D_V, g.t_kv); SB();
-    for (int t = 0; t < nt; t++) {
-        const int cur = t & 1, nxt = (t + 1) & 1;
-        const int* tkc = topk_all + t * TILE_K;
-        // prefetch tile t+1 into the other buffer (its DMA overlaps this tile's compute)
-        if (t + 1 < nt) {
-            gather_async<NT>(ks[nxt],  g.KVg, topk_all + (t+1)*TILE_K, 0,   g.t_kv); SB();
-            gather_async<NT>(krs[nxt], g.KVg, topk_all + (t+1)*TILE_K, D_V, g.t_kv); SB();
-            asm volatile("s_waitcnt vmcnt(%0)" :: "i"(NDMA)); SB();   // drain tile t, keep t+1 in flight
-        } else {
-            __builtin_amdgcn_s_waitcnt(0); SB();
-        }
-        __syncthreads(); SB();
+    constexpr int NDMA = gdma<NT,KlS>() + gdma<NT,KrS>();
 
-        // compute — FULL schedule pin (SB after each op) = stable at VGPR=256. (Costs ~2ms ILP vs unpinned;
-        // the real perf fix is the structural rewrite hk_fwd5 (QB=32, no LDS roundtrip). This = stable base.)
-        ST s; zero(s); SB();
-        { KlT k_l; load(k_l, ks[cur]); SB();
-          KrT k_r; load(k_r, krs[cur]); SB();
-          asm volatile("s_waitcnt lgkmcnt(0)"); SB();   // LDS reads only; keep t+1 gather (vmcnt) in flight
-          mma_ABt(s, k_l, q_l, s); SB();
-          mma_ABt(s, k_r, q_r, s); SB();
-        }
-        mul(s, s, g.scale); SB();
+    auto qk = [&](ST& Sout, int buf, const int* tk) {
+        zero(Sout);
+        KlT k_l; load(k_l, ks[buf]); KrT k_r; load(k_r, krs[buf]);
+        asm volatile("s_waitcnt lgkmcnt(0)"); SB();
+        mma_ABt(Sout, k_l, q_l, Sout); SB();
+        mma_ABt(Sout, k_r, q_r, Sout); SB();
+        mul(Sout, Sout, g.scale);
 #ifdef ENABLE_MASK
-        { fill_mask<kittens::WARP_THREADS>(mts[warpid], tkc); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
-          MbT mtb; load(mtb, mts[warpid]); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
-          typename MbT::col_vec cvb; row_max(cvb, mtb);
-          typename ST::col_vec cv; copy(cv, cvb); add_row(s, s, cv); SB(); }
+        fill_mask<kittens::WARP_THREADS>(mts[warpid], tk); asm volatile("s_waitcnt lgkmcnt(0)");
+        MbT mtb; load(mtb, mts[warpid]); asm volatile("s_waitcnt lgkmcnt(0)");
+        typename MbT::col_vec cvb; row_max(cvb, mtb);
+        typename ST::col_vec cv; copy(cv, cvb); add_row(Sout, Sout, cv);
 #endif
-        col_max(m_new, s, m_i); SB();
-        sub(alpha, m_i, m_new); exp2(alpha, alpha); SB();
-        sub_col(s, s, m_new); exp2(s, s); SB();
-        mul(l_i, l_i, alpha); col_sum(l_i, s, l_i); SB();
-        mul_col(acc, acc, alpha); SB();
-
-        PbT pb; copy(pb, s); SB();
-        PopT pop;
-#ifdef PROF_NORT
-        __builtin_memcpy(&pop, &pb, sizeof(pop));   // TIMING ONLY (wrong values): bypass LDS roundtrip
-#else
-        store(ps[warpid], pb); SB();
-        asm volatile("s_waitcnt lgkmcnt(0)"); SB();   // per-warp ps: warp's own store->load, lgkmcnt only (no workgroup barrier)
-        load(pop, ps[warpid]); SB();
-        asm volatile("s_waitcnt lgkmcnt(0)"); SB();
-#endif
-
-        VT v_l; load(v_l, ks[cur]); SB();
-        asm volatile("s_waitcnt lgkmcnt(0)"); SB();
+    };
+    auto softmax_pv = [&](ST& Sp, int vbuf) {
+        col_max(m_new, Sp, m_i);
+        sub(alpha, m_i, m_new); exp2(alpha, alpha);
+        sub_col(Sp, Sp, m_new); exp2(Sp, Sp);
+        mul(l_i, l_i, alpha); col_sum(l_i, Sp, l_i);
+        mul_col(acc, acc, alpha);
+        PbT pb; copy(pb, Sp);
+        store(ps[warpid], pb); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
+        PopT pop; load(pop, ps[warpid]); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
+        VT v_l; load(v_l, ks[vbuf]); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
         mma_AtB(acc, v_l, pop, acc); SB();
-        copy(m_i, m_new); SB();
+        copy(m_i, m_new);
+    };
+
+    // prologue: gather tile 0 + tile 1 (assumes nt>=2)
+    gather_async<NT>(ks[0],  g.KVg, topk_all,          0,   g.t_kv);
+    gather_async<NT>(krs[0], g.KVg, topk_all,          D_V, g.t_kv);
+    gather_async<NT>(ks[1],  g.KVg, topk_all + TILE_K, 0,   g.t_kv);
+    gather_async<NT>(krs[1], g.KVg, topk_all + TILE_K, D_V, g.t_kv);
+    SB();
+    asm volatile("s_waitcnt vmcnt(%0)" :: "i"(NDMA)); SB();   // drain tile0, tile1 in flight
+    __syncthreads(); SB();
+    ST S_prev; qk(S_prev, 0, topk_all);                       // S_prev = QK(tile 0)
+
+    for (int t = 0; t < nt - 1; t++) {
+        const int cur = t & 1, nxt = (t + 1) & 1;
+        asm volatile("s_waitcnt vmcnt(0)"); SB();             // tile t+1 (buf nxt) gather done
         __syncthreads(); SB();
+        ST S_cur; qk(S_cur, nxt, topk_all + (t+1)*TILE_K);    // QK(tile t+1) [MFMA]
+        softmax_pv(S_prev, cur);                              // softmax+PV(tile t) [overlaps QK]
+        __syncthreads(); SB();                                // all warps done reading buf cur
+        if (t + 2 < nt) {                                     // gather tile t+2 into freed buf cur (async)
+            gather_async<NT>(ks[cur],  g.KVg, topk_all + (t+2)*TILE_K, 0,   g.t_kv);
+            gather_async<NT>(krs[cur], g.KVg, topk_all + (t+2)*TILE_K, D_V, g.t_kv); SB();
+        }
+        copy(S_prev, S_cur);                                  // promote
     }
+    softmax_pv(S_prev, (nt - 1) & 1);                         // drain: softmax+PV(tile nt-1)
 
     if (g.has_sink) {
         typename ST::row_vec sink, m_fin, afix, l_tot;
