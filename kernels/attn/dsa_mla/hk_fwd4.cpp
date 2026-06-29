@@ -68,6 +68,12 @@ using OT  = rt<float, D_V,    QB,     col_l, rt_16x16_s>;
 using OtT = rt<float, QB,     D_V,    row_l, rt_16x16_s>;
 using KlS = st_bf<TILE_K, D_V,    st_32x32_s>;
 using KrS = st_bf<TILE_K, D_ROPE, st_32x32_s>;
+// # of raw_buffer_load_lds instructions (vmcnt increments) a gather_async<N_THREADS> issues for tile ST.
+template<int N_THREADS, typename ST> __device__ constexpr int gdma() {
+    constexpr int bpt = ST::underlying_subtile_bytes_per_thread;
+    constexpr int totalB = ST::rows * ST::cols * (int)sizeof(typename ST::dtype);
+    return (totalB + bpt * N_THREADS - 1) / (bpt * N_THREADS);
+}
 using MbT = rt<bf16, TILE_K, QB, col_l, rt_16x16_s>;
 using MtS = st_bf<TILE_K, QB, st_16x16_s>;
 
@@ -127,52 +133,60 @@ __global__ void hk_fwd4(const g_t g){
     typename ST::row_vec m_i, l_i, m_new, alpha;
     neg_infty(m_i); zero(l_i);
 
-    // prologue: async-gather tile 0 into buf 0
-    gather_async<NT>(ks[0],  g.KVg, topk_all, 0,   g.t_kv);
-    gather_async<NT>(krs[0], g.KVg, topk_all, D_V, g.t_kv);
-
+    // SINGLE-BUFFER async + EXPLICIT SCHEDULE PINNING (sched_barrier(0) = no reorder across).
+    // Both scalar(stable) and async(unstable) are VGPR=256 -> the knife-edge is the SCHEDULE, not reg count.
+    // Pin the per-tile order so codegen can't wander (HK's control gluon lacks). #define SB to the fence.
+    #define SB() __builtin_amdgcn_sched_barrier(0)
+    constexpr int NDMA = gdma<NT,KlS>() + gdma<NT,KrS>();   // DMAs per tile gather (vmcnt units)
+    // prologue: gather tile 0 into buf 0 (async)
+    gather_async<NT>(ks[0],  g.KVg, topk_all,        0,   g.t_kv); SB();
+    gather_async<NT>(krs[0], g.KVg, topk_all,        D_V, g.t_kv); SB();
     for (int t = 0; t < nt; t++) {
         const int cur = t & 1, nxt = (t + 1) & 1;
-        if (t + 1 < nt) {     // prefetch tile t+1 into the other buffer (overlaps compute t — once stable)
-            gather_async<NT>(ks[nxt],  g.KVg, topk_all + (t+1)*TILE_K, 0,   g.t_kv);
-            gather_async<NT>(krs[nxt], g.KVg, topk_all + (t+1)*TILE_K, D_V, g.t_kv);
-        }
-        __builtin_amdgcn_s_waitcnt(0);   // WIP: full drain (no overlap). Knife-edge blocks correctness here.
-        __syncthreads();
-
         const int* tkc = topk_all + t * TILE_K;
-        ST s; zero(s);
-        { KlT k_l; load(k_l, ks[cur]);
-          KrT k_r; load(k_r, krs[cur]);
-          __builtin_amdgcn_s_waitcnt(0);
-          mma_ABt(s, k_l, q_l, s);
-          mma_ABt(s, k_r, q_r, s);
+        // prefetch tile t+1 into the other buffer (its DMA overlaps this tile's compute)
+        if (t + 1 < nt) {
+            gather_async<NT>(ks[nxt],  g.KVg, topk_all + (t+1)*TILE_K, 0,   g.t_kv); SB();
+            gather_async<NT>(krs[nxt], g.KVg, topk_all + (t+1)*TILE_K, D_V, g.t_kv); SB();
+            asm volatile("s_waitcnt vmcnt(%0)" :: "i"(NDMA)); SB();   // drain tile t, keep t+1 in flight
+        } else {
+            __builtin_amdgcn_s_waitcnt(0); SB();
         }
-        mul(s, s, g.scale);
+        __syncthreads(); SB();
+
+        // compute — FULL schedule pin (SB after each op) = stable at VGPR=256. (Costs ~2ms ILP vs unpinned;
+        // the real perf fix is the structural rewrite hk_fwd5 (QB=32, no LDS roundtrip). This = stable base.)
+        ST s; zero(s); SB();
+        { KlT k_l; load(k_l, ks[cur]); SB();
+          KrT k_r; load(k_r, krs[cur]); SB();
+          asm volatile("s_waitcnt lgkmcnt(0)"); SB();   // LDS reads only; keep t+1 gather (vmcnt) in flight
+          mma_ABt(s, k_l, q_l, s); SB();
+          mma_ABt(s, k_r, q_r, s); SB();
+        }
+        mul(s, s, g.scale); SB();
 #ifdef ENABLE_MASK
-        { fill_mask<kittens::WARP_THREADS>(mts[warpid], tkc); __builtin_amdgcn_s_waitcnt(0);
-          MbT mtb; load(mtb, mts[warpid]); __builtin_amdgcn_s_waitcnt(0);
+        { fill_mask<kittens::WARP_THREADS>(mts[warpid], tkc); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
+          MbT mtb; load(mtb, mts[warpid]); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
           typename MbT::col_vec cvb; row_max(cvb, mtb);
-          typename ST::col_vec cv; copy(cv, cvb); add_row(s, s, cv); }
+          typename ST::col_vec cv; copy(cv, cvb); add_row(s, s, cv); SB(); }
 #endif
-        col_max(m_new, s, m_i);
-        sub(alpha, m_i, m_new); exp2(alpha, alpha);
-        sub_col(s, s, m_new); exp2(s, s);
-        mul(l_i, l_i, alpha); col_sum(l_i, s, l_i);
-        mul_col(acc, acc, alpha);
+        col_max(m_new, s, m_i); SB();
+        sub(alpha, m_i, m_new); exp2(alpha, alpha); SB();
+        sub_col(s, s, m_new); exp2(s, s); SB();
+        mul(l_i, l_i, alpha); col_sum(l_i, s, l_i); SB();
+        mul_col(acc, acc, alpha); SB();
 
-        PbT pb; copy(pb, s);
-        store(ps[warpid], pb);
-        __builtin_amdgcn_s_waitcnt(0);
-        __builtin_amdgcn_s_barrier();
-        PopT pop; load(pop, ps[warpid]);
-        __builtin_amdgcn_s_waitcnt(0);
+        PbT pb; copy(pb, s); SB();
+        store(ps[warpid], pb); SB();
+        asm volatile("s_waitcnt lgkmcnt(0)"); SB();   // per-warp ps: warp's own store->load, lgkmcnt only (no workgroup barrier)
+        PopT pop; load(pop, ps[warpid]); SB();
+        asm volatile("s_waitcnt lgkmcnt(0)"); SB();
 
-        VT v_l; load(v_l, ks[cur]);   // V from same buffer (late load)
-        __builtin_amdgcn_s_waitcnt(0);
-        mma_AtB(acc, v_l, pop, acc);
-        copy(m_i, m_new);
-        __syncthreads();              // all warps done with buf[cur] before t+1 reuses it (t+2->cur)
+        VT v_l; load(v_l, ks[cur]); SB();
+        asm volatile("s_waitcnt lgkmcnt(0)"); SB();
+        mma_AtB(acc, v_l, pop, acc); SB();
+        copy(m_i, m_new); SB();
+        __syncthreads(); SB();
     }
 
     if (g.has_sink) {
