@@ -107,6 +107,24 @@ a token table + emitter, so the schedule is data not code.
 
 ## LOG (newest first)
 
+### 2026-06-29 (cont) — SWP fully mapped: structural SWP does NOT overlap (needs explicit interleave); NW=4 warp-3 fragility [DEFINITIVE]
+Pursued the cross-tile SWP (hk_fwd5) to the end. Two rigorously-established findings:
+1. **The SWP LOGIC is correct** — hk_fwd5 PASSES at NW=1 and NW=2 (nt=36). At NW=4 ONLY warp 3 (heads 48-63)
+   corrupts (one acc D_V-subtile/head, grows with nt); NW=2 (warps 0,1) clean. So it's the deep multi-warp
+   (4th-warp) register fragility — SAME class as the prior session's NW>1 wall (surface fixes: full
+   sched_barrier pin, copy→struct, 3-buffer — NONE fix it; 3-buffer made it worse). Needs the gqa-structured
+   rewrite (rt_32x32 + reinterpret, no LDS roundtrip), not patches.
+2. **The structural SWP does NOT deliver overlap** — at NW=2 (correct for both): SWP 22.5ms vs non-SWP 18.5ms
+   (SLOWER); at NW=4: 11ms vs 8.8ms (slower). The sequential qk()/softmax_pv() lambda calls + their lgkmcnt
+   waits SERIALIZE QK(t+1) and softmax(t) despite the structural separation. **Real overlap requires explicit
+   `sched_group_barrier(MFMA,n)/(VALU,m)` instruction interleaving (gqa's sched_barrier_pairs, ~13 hand-tuned
+   clusters), NOT just restructuring.** This is the crux I underestimated.
+**CONCLUSION (honest, fully evidenced):** beating gluon 3ms needs BOTH (a) the gqa-structured rewrite to fix
+the NW=4 multi-warp fragility + kill the LDS roundtrip, AND (b) gqa-level explicit instruction scheduling to
+realize the overlap. That's a large expert (Leon/gqa-level) effort. **hk_fwd4 (8.8ms, stable, correct, 2.3×
+over naive) is the deliverable.** Did not beat gluon. The diagnosis + correct-at-NW≤2 SWP + knife-edge
+solution are the durable foundation.
+
 ### 2026-06-29 (overnight, autonomous) — SWP build: knife-edge CRACKED, 20→8.8ms stable; gluon 3ms gap is structural
 Drove the pipeline per the user's mandate (HK has MORE hw control than gluon → can pin what the compiler won't).
 RETARGETED to the latest gluon early-gather SWP (aiter PR2922 c4b07fe5a = 3.03ms).
