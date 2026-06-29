@@ -50,8 +50,19 @@ single-buffer reference + correctness oracle (hk_fwd3_test).
    ✅ DONE 2026-06-28: reverse-swizzle async gather VALIDATED in gcheck (ASYNC_GATHER path): worst 0.0,
    NW=1/4, K row_l + V col_l. size=bpt=16, lds_ptr=lds_base+i*nw*bpw (per-warp), reverse map lbo->(g_row,
    g_col)->topk. This is the pipeline's gather primitive. NEXT = step 2 (2-buffer + prefetch).
-2. **2-buffer + prefetch-t+1** (naive pipeline, no overlap scheduling): gather t+1 during compute t.
-   Validate + measure (expect modest gain; the compiler may not overlap — like the old hk_fwd_swp).
+2. **2-buffer + prefetch-t+1** (naive pipeline) — ATTEMPTED 2026-06-28 (hk_fwd4.cpp), BLOCKED by knife-edge.
+   The async gather (validated in gcheck) drops into the full kernel and trips the codegen knife-edge
+   (VGPR=256, 0 spill): single-buffer async = nondeterministic partial NaN (~1300/32768, varies run-to-run);
+   2-buffer = deterministic all-NaN. SAME root cause as the int4 sync gather — ANY faster-than-scalar gather
+   perturbs the fragile single-buffer scheduling at the 256-VGPR cap. So step 2 cannot be validated alone;
+   the gather speedup MUST be paired with register relief + scheduling (steps below) to be correct+stable.
+   ⇒ REORDER: do step 5 (subtile V) and/or step 4 (sched_group_barrier) FIRST to get off the knife-edge,
+   THEN layer the async gather + prefetch.
+   API notes for subtile-V (the register-relief lever): the shared->reg col-offset load
+   `load(RT col_l, ST, int col_offset)` is the **ds_read_tr transpose-load** (requires RT::cols==ST::rows,
+   RT::width==1) — it loads a transposed [chunk,TILE_K] V slice; pair with `subtile_inplace` on acc (find its
+   header — gqa kernel.cpp uses `subtile_inplace<16>(v_reg,i)`/`(att,i)`) to mma each D_V-chunk into acc rows.
+   Goal: never hold the full v_l[32,512]=128 VGPR; peak < 256 → stable codegen.
 3. **Early-gather (evacuate V, gather t+2 into freed buf) + S_prev carry**: the gluon structure.
 4. **Explicit sched_group_barrier** for softmax∥QK overlap (the actual win + codegen stabilization).
 5. Subtile PV if VGPR>256/spills.
