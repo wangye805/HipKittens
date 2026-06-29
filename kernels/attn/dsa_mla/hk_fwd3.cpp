@@ -57,6 +57,7 @@ using OtT = rt<float, QB,     D_V,    row_l, rt_16x16_s>;
 using KlS = st_bf<TILE_K, D_V,    st_32x32_s>;
 using KrS = st_bf<TILE_K, D_ROPE, st_32x32_s>;
 using MtS = st_bf<TILE_K, QB, st_16x16_s>;        // per-key invalid mask, broadcast over QB (bf16)
+using MbT = rt<bf16, TILE_K, QB, col_l, rt_16x16_s>;  // mask tile in registers (for row_max -> col_vec)
 
 // Fill mask tile mt[k,h] = (topk[k] < 0 ? -1e30 : 0)  (forward swizzle, like the gather).
 template<int N_THREADS>
@@ -131,9 +132,14 @@ __global__ void hk_fwd3(const g_t g){
         }   // k_l/k_r dead -> regs freed before v_l[32,512] is loaded for PV
         mul(s, s, g.scale);
 #ifdef ENABLE_MASK
-        { rt<bf16,TILE_K,QB,col_l,rt_16x16_s> mtb; load(mtb, mts); __builtin_amdgcn_s_waitcnt(0);
-          ST mt; copy(mt, mtb); add(s, s, mt); }  // -1 invalid-key mask (bf16->float). NW=1 correct;
-#endif                                            // NW=4 needs pressure relief (revisit w/ pipeline).
+        // -1 invalid-key mask as a per-key col_vec (LOW footprint: no float tile, dodges the NW=4
+        // register knife-edge that the float-tile mask tripped). Correct + deterministic at NW=4.
+        // row_max reduces the broadcast mask tile (each row constant) -> per-key col_vec.
+        { MbT mtb; load(mtb, mts); __builtin_amdgcn_s_waitcnt(0);
+          typename MbT::col_vec cvb; row_max(cvb, mtb);
+          typename ST::col_vec cv; copy(cv, cvb);
+          add_row(s, s, cv); }   // invalid keys -> -1e30 -> exp2 0 -> excluded from softmax/PV
+#endif
         __builtin_amdgcn_sched_barrier(0);
 #ifdef DBGS
         if (j == 0) { rt<float,QB,TILE_K,row_l,rt_16x16_s> st_; transpose(st_, s);

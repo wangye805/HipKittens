@@ -30,7 +30,7 @@ int main(int argc,char**argv){
     for(auto&x:KV)x=U(rng)*0.1f; for(auto&x:sink)x=U(rng)*0.5f;
     std::vector<int> topk(NTILES*TILE_K);
     for(auto&t:topk)t=Ti(rng);
-    for(int i=0;i<ninv && i<(int)topk.size();i++) topk[(i*37+5)%topk.size()]=-1;  // scatter -1s
+    for(int i=0;i<ninv && i<(int)topk.size();i++) topk[topk.size()-1-i]=-1;  // contiguous -1 TAIL (real DSA warmup pattern; large ninv -> whole trailing tiles all-invalid)
 
     // per-warp Q [NW,QB,D_V]/[NW,QB,D_ROPE]
     std::vector<float> Qlw(NW*QB*D_V),Qrw(NW*QB*D_ROPE);

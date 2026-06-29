@@ -24,8 +24,15 @@ Config: `BLOCK_H=64` heads/program = `NW=4` warps × `QB=16` heads (M-split), `T
 - **online softmax** with running `m_i/l_i`, `acc` rescale by `alpha`; **sink fold** (V4) in the epilogue.
 - **M-split**: each warp owns `QB=16` heads; per-warp Q load + O store use the **depth** coord
   `{0,warpid,0,0}` (the col-dim coord silently fails for col-tile≥2 on HK).
-- **`-1` invalid-key mask** (`#ifdef ENABLE_MASK`): in-kernel broadcast mask tile, add `-1e30` to invalid
-  keys' scores pre-softmax. Correct at NW=1; NW=4 needs register-pressure relief (revisit with pipeline).
+- **`-1` invalid-key mask** (`#ifdef ENABLE_MASK`): DSA pads each query's fixed-width top-k list with `-1`
+  whenever it has fewer than TOPK valid (causal) keys — i.e. the first ~k tokens of every sequence
+  (short-context fallback to dense; DeepSeek-V3.2 §DSA). Invalid keys are safe-gathered to row 0 then
+  forced to `-1e30` pre-softmax so they're excluded from the max/denominator/output. Applied as a low-
+  footprint **per-key col_vec** (`row_max` of the broadcast mask tile → `add_row`) to avoid the float-tile
+  register pressure. **Correct + deterministic at NW=4** (the production config) across tail-invalid sweeps
+  incl. all-invalid trailing tiles; extreme warmup (only tens of valid keys) shows a small bf16-P precision
+  tail (~0.04, no NaN), same regime as sharp-softmax. (NW=1+mask is on the codegen knife-edge — not shipped;
+  NW=4 is the gluon-matching target.)
 
 ### The key correctness lesson (NW>1)
 The months-long NW>1 fragility was **register-lifetime corruption at the VGPR=256 cap**, NOT a sync race or
