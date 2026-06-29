@@ -34,14 +34,33 @@ __device__ inline void gather_to_shared(ST& dst, const GL& kv, const int* topk,
     Tp* gbase = (Tp*)&kv[coord<>{0, 0, 0, 0}];
     char* lds = (char*)&dst.data[0];
     const int t = threadIdx.x;
-    for (int e = t; e < total; e += N_THREADS) {
-        const int k = e / cols, d = e % cols;
+#ifdef VEC_GATHER
+    // Vectorized 16-byte (8 bf16) gather: the st swizzle leaves the low 16B contiguous, and KV rows
+    // are contiguous in d, so each (k, d8) is one coalesced int4 load + one int4 LDS store.
+    // VALIDATED CORRECT in isolation (gcheck) and ~2.2x faster (20->9ms), BUT it perturbs the
+    // single-buffer kernel's codegen knife-edge -> nondeterministic NaN. Enable only once the kernel
+    // is stabilized (subtiled mma + explicit scheduling / double-buffer pipeline).
+    constexpr int VW = 16 / sizeof(Tp);                     // 8 for bf16
+    static_assert(cols % VW == 0, "cols must be divisible by 16B run");
+    constexpr int nvec = total / VW;
+    for (int e = t; e < nvec; e += N_THREADS) {
+        const int idx = e * VW;
+        const int k = idx / cols, d = idx % cols;           // d is VW-aligned
         int pr = topk[k]; if (pr < 0) pr = 0;               // safe gather (-1 padding)
+        const int sub_id = (k / SUBR) * SPR + (d / SUBC);
+        const uint32_t off = sub_id * SUBB + dst.swizzle({k % SUBR, d % SUBC});
+        *(int4*)(lds + off) = *(const int4*)(gbase + (size_t)pr * row_stride + col_off + d);
+    }
+#else
+    for (int e = t; e < total; e += N_THREADS) {            // scalar gather (stable, correctness-first)
+        const int k = e / cols, d = e % cols;
+        int pr = topk[k]; if (pr < 0) pr = 0;
         Tp val = gbase[(size_t)pr * row_stride + col_off + d];
         const int sub_id = (k / SUBR) * SPR + (d / SUBC);
         const uint32_t off = sub_id * SUBB + dst.swizzle({k % SUBR, d % SUBC});
         *(Tp*)(lds + off) = val;
     }
+#endif
 }
 
 using QlT = rt<bf16,  QB,     D_V,    row_l, rt_16x32_s>;
@@ -99,9 +118,15 @@ __global__ void hk_fwd3(const g_t g){
 
     const int tid = threadIdx.x;
     const int warpid = kittens::warpid();
+    // Full grid: blockIdx.x = token, blockIdx.y = head-group; gridDim.y = #head-groups.
+    // Q/O laid out [T, Hgroups, NW, QB, D] flattened -> dim0 = token*HG + hg, dim1 = warpid.
+    const int HG = gridDim.y;
+    const int qo_row = blockIdx.x * HG + blockIdx.y;     // token*HG + hg
+    const int sink_row = blockIdx.y * NW + warpid;        // head-block within [H]
+    const int tok = blockIdx.x;
 
-    QlT q_l; load(q_l, g.Qlg, coord<>{0,warpid,0,0});
-    QrT q_r; load(q_r, g.Qrg, coord<>{0,warpid,0,0});
+    QlT q_l; load(q_l, g.Qlg, coord<>{qo_row,warpid,0,0});
+    QrT q_r; load(q_r, g.Qrg, coord<>{qo_row,warpid,0,0});
     __builtin_amdgcn_s_waitcnt(0);
 
     OT acc; zero(acc);
@@ -109,7 +134,7 @@ __global__ void hk_fwd3(const g_t g){
     neg_infty(m_i); zero(l_i);
 
     for(int j=0; j<g.n_tiles; j++){
-        if (tid < TILE_K) topk[tid] = g.Tkg[coord<>{0,0,j,tid}];
+        if (tid < TILE_K) topk[tid] = g.Tkg[coord<>{tok,0,j,tid}];
         __syncthreads();
         __builtin_amdgcn_sched_barrier(0);
         gather_to_shared<NT>(ks,  g.KVg, topk, 0,   g.t_kv);
@@ -143,7 +168,7 @@ __global__ void hk_fwd3(const g_t g){
         __builtin_amdgcn_sched_barrier(0);
 #ifdef DBGS
         if (j == 0) { rt<float,QB,TILE_K,row_l,rt_16x16_s> st_; transpose(st_, s);
-                      store(g.Dg, st_, coord<>{0,warpid,0,0}); }
+                      store(g.Dg, st_, coord<>{qo_row,warpid,0,0}); }
 #endif
 
         col_max(m_new, s, m_i);
@@ -169,7 +194,7 @@ __global__ void hk_fwd3(const g_t g){
     // ---- epilogue: sink fold + normalize ----
     if (g.has_sink) {
         typename ST::row_vec sink, m_fin, afix, l_tot;
-        load(sink, g.Sg, coord<>{0,0,warpid,0});
+        load(sink, g.Sg, coord<>{0,0,sink_row,0});
         max(m_fin, m_i, sink);
         sub(afix, m_i, m_fin); exp2(afix, afix);
         sub(sink, sink, m_fin); exp2(sink, sink);
@@ -181,5 +206,5 @@ __global__ void hk_fwd3(const g_t g){
     }
 
     OtT acc_t; transpose(acc_t, acc);
-    store(g.Og, acc_t, coord<>{0,warpid,0,0});
+    store(g.Og, acc_t, coord<>{qo_row,warpid,0,0});
 }

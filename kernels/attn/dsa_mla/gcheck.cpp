@@ -17,13 +17,13 @@ __device__ inline void gather_to_shared(ST& dst, const GL& kv, const int* topk, 
     Tp* gbase=(Tp*)&kv[coord<>{0,0,0,0}];
     char* lds=(char*)&dst.data[0];
     const int t=threadIdx.x;
-    for(int e=t;e<total;e+=N_THREADS){
-        const int k=e/cols, d=e%cols;
+    constexpr int VW=16/sizeof(Tp); constexpr int nvec=total/VW;
+    for(int e=t;e<nvec;e+=N_THREADS){
+        const int idx=e*VW; const int k=idx/cols, d=idx%cols;
         int pr=topk[k]; if(pr<0)pr=0;
-        Tp val=gbase[(size_t)pr*row_stride+col_off+d];
         const int sub_id=(k/SUBR)*SPR+(d/SUBC);
         const uint32_t off=sub_id*SUBB+dst.swizzle({k%SUBR,d%SUBC});
-        *(Tp*)(lds+off)=val;
+        *(int4*)(lds+off)=*(const int4*)(gbase+(size_t)pr*row_stride+col_off+d);
     }
 }
 using KlS=st_bf<TILE_K,D_V,st_32x32_s>;
