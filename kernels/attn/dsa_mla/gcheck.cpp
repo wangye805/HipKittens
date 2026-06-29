@@ -18,6 +18,35 @@ __device__ inline void gather_to_shared(ST& dst, const GL& kv, const int* topk, 
     char* lds=(char*)&dst.data[0];
     const int t=threadIdx.x;
     constexpr int VW=16/sizeof(Tp); constexpr int nvec=total/VW;
+#ifdef ASYNC_GATHER
+    // Async global->LDS DMA (raw_buffer_load_lds writes LDS lane-consecutively). REVERSE-swizzle:
+    // for each lane-consecutive LDS byte offset (lbo), compute the logical (g_row,g_col) it holds,
+    // then read global[topk[g_row]*stride + col_off + g_col]. (= original hk_fwd gather, proven.)
+    const int TKV=4096;
+    constexpr int bpt = ST::underlying_subtile_bytes_per_thread;   // 16
+    constexpr int RB  = ST::underlying_subtile_row_bytes;
+    constexpr int bpw = bpt * kittens::WARP_THREADS;
+    constexpr int totalB = rows*cols*(int)sizeof(Tp);
+    constexpr int nw = N_THREADS/kittens::WARP_THREADS;
+    constexpr int mpt = (totalB + bpt*N_THREADS - 1)/(bpt*N_THREADS);
+    const int laneid=kittens::laneid(); const int warpid=kittens::warpid()%nw;
+    i32x4 srsrc=make_srsrc(gbase,(uint32_t)((size_t)TKV*row_stride*sizeof(Tp)));
+    const uintptr_t lds_base=reinterpret_cast<uintptr_t>(&dst.data[0]) + warpid*bpw;
+    #pragma unroll
+    for(int i=0;i<mpt;i++){
+        const int lbo = laneid*bpt + warpid*bpw + i*nw*bpw;
+        if(lbo>=totalB) continue;
+        const int sid=lbo/SUBB, srow=sid/SPR, scol=sid%SPR, so=lbo%SUBB;
+        const int row=so/RB, col=(so%RB)/(int)sizeof(Tp);
+        const uint32_t sw=dst.swizzle({row,col});
+        const int g_row=(sw/RB)+srow*SUBR;
+        const int g_col=(sw%RB)/(int)sizeof(Tp)+scol*SUBC;
+        int pr=topk[g_row]; if(pr<0)pr=0;
+        uint32_t goff=(uint32_t)(((size_t)pr*row_stride+col_off+g_col)*sizeof(Tp));
+        as3_uint32_ptr lds_ptr=(as3_uint32_ptr)(lds_base + i*nw*bpw);
+        llvm_amdgcn_raw_buffer_load_lds(srsrc, lds_ptr, bpt, goff, 0, 0, (int)coherency::cache_all);
+    }
+#else
     for(int e=t;e<nvec;e+=N_THREADS){
         const int idx=e*VW; const int k=idx/cols, d=idx%cols;
         int pr=topk[k]; if(pr<0)pr=0;
@@ -25,6 +54,7 @@ __device__ inline void gather_to_shared(ST& dst, const GL& kv, const int* topk, 
         const uint32_t off=sub_id*SUBB+dst.swizzle({k%SUBR,d%SUBC});
         *(int4*)(lds+off)=*(const int4*)(gbase+(size_t)pr*row_stride+col_off+d);
     }
+#endif
 }
 using KlS=st_bf<TILE_K,D_V,st_32x32_s>;
 using KlT=rt<bf16,TILE_K,D_V,row_l,rt_16x32_s>;
