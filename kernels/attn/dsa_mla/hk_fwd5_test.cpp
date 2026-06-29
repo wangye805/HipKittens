@@ -89,6 +89,7 @@ int main(int argc,char**argv){
 #endif
 
     int nanc=0,g2=0,g3=0,g5=0; double esum=0; long ecnt=0; float worst=0;
+    int badhead[256]={0}; int worst_h=-1,worst_v=-1; float worst_hk=0,worst_ref=0;
     for(int h=0;h<BH;h++){
         std::vector<float> s(NKK); float m=-1e30f;
         for(int kk=0;kk<NKK;kk++){ int kr=topk[kk];
@@ -105,9 +106,12 @@ int main(int argc,char**argv){
             for(int kk=0;kk<NKK;kk++){ int kr=topk[kk]; if(kr<0)continue; a+=bf(s[kk])*bf(KV[kr*D_QK+v]); }
             float o=a*afix/l_tot, hk=b2f(Ob[h*D_V+v]);   // Og layout [NW,QB,D_V]=[BH,D_V]
             if(!(hk==hk)){nanc++;continue;}
-            float e=std::fabs(hk-o); if(e>worst)worst=e; esum+=e; ecnt++;
-            if(e>0.02f)g2++; if(e>0.03f)g3++; if(e>0.05f)g5++; }
+            float e=std::fabs(hk-o); if(e>worst){worst=e;worst_h=h;worst_v=v;worst_hk=hk;worst_ref=o;} esum+=e; ecnt++;
+            if(e>0.02f)g2++; if(e>0.03f){g3++; badhead[h]++;} if(e>0.05f)g5++; }
     }
+    { int nbh=0,firstbad=-1,lastbad=-1; for(int h=0;h<BH;h++) if(badhead[h]){nbh++; if(firstbad<0)firstbad=h; lastbad=h;}
+      printf("  [DBG] worst at h=%d v=%d hk=%.4f ref=%.4f | bad-heads=%d (first=%d last=%d) | v-of-worst%%16=%d\n",
+             worst_h,worst_v,worst_hk,worst_ref,nbh,firstbad,lastbad,worst_v%16); }
     printf("HK_FWD5 NW=%d nt=%d sink=%d ninv=%d seed=%d: worst=%.5f mean=%.6f >.02=%d >.03=%d >.05=%d nan=%d %s\n",
            NW, NTILES, has_sink, ninv, seed, worst, esum/ecnt, g2, g3, g5, nanc, (g3==0&&nanc==0)?"PASS":"FAIL");
     return 0;

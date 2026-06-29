@@ -1,8 +1,12 @@
-// hk_fwd5.cpp — CROSS-TILE SWP attempt (WIP). Carry S_prev; QK(t+1)∥softmax+PV(t) to hide latency.
-// STATUS: correct at nt<=8, but a race/bug at nt=36 (256 bad, mostly deterministic) + spills 28 VGPR (S_prev
-//   +S_cur carry over budget) -> 11ms (SLOWER than hk_fwd4 8.8ms). The latency-hiding could help (my kernel
-//   is latency-bound ~7ms) but only if the spill is removed (register relief) AND the high-nt bug fixed.
-//   Shelved pending register relief. hk_fwd4 = the stable deliverable.
+// hk_fwd5.cpp — CROSS-TILE SWP (WIP). Carry S_prev; QK(t+1)∥softmax+PV(t) to hide inter-tile latency.
+// This IS the right lever: gluon (occ=1, same tiling) hits 3ms via single-wave software pipelining, which my
+// serialized hk_fwd4 (8.8ms) lacks. NOT occupancy (both occ=1).
+// BUG (localized, not fixed): correct nt<=~33, but at nt=36 WARP 3 ONLY (heads 48-63) corrupts — one acc
+//   D_V-subtile (16 elems)/head, error GROWS with nt (accumulates in warp-3's carried acc). Full sched_barrier
+//   pinning does NOT fix it (so it's a per-warp logic/state bug, not the schedule). Same class as the original
+//   NW>1 coord issues. Also spills 28 VGPR (S_prev+S_cur carry) -> 11ms (slower) until register relief.
+//   Suspect: warp-3's pop(ps[3]) or acc accumulation under the carry. hk_fwd4 (no carry) is clean -> the carry
+//   path is the culprit. hk_fwd4 = the stable deliverable; this needs the warp-3 bug fixed + de-spill to win.
 // hk_fwd4.cpp — DSA V4 sparse-MLA fwd, HK gfx950, SOFTWARE-PIPELINED (toward gluon early-gather 3.03ms).
 // ⚠⚠ WIP / NOT CORRECT YET. The async gather (raw_buffer_load_lds, reverse-swizzle) is VALIDATED in
 // isolation (gcheck), but dropping it into the full kernel trips the codegen KNIFE-EDGE (VGPR=256, 0 spill):
@@ -150,7 +154,7 @@ __global__ void hk_fwd5(const g_t g){
         asm volatile("s_waitcnt lgkmcnt(0)"); SB();
         mma_ABt(Sout, k_l, q_l, Sout); SB();
         mma_ABt(Sout, k_r, q_r, Sout); SB();
-        mul(Sout, Sout, g.scale);
+        mul(Sout, Sout, g.scale); SB();
 #ifdef ENABLE_MASK
         fill_mask<kittens::WARP_THREADS>(mts[warpid], tk); asm volatile("s_waitcnt lgkmcnt(0)");
         MbT mtb; load(mtb, mts[warpid]); asm volatile("s_waitcnt lgkmcnt(0)");
@@ -159,17 +163,17 @@ __global__ void hk_fwd5(const g_t g){
 #endif
     };
     auto softmax_pv = [&](ST& Sp, int vbuf) {
-        col_max(m_new, Sp, m_i);
-        sub(alpha, m_i, m_new); exp2(alpha, alpha);
-        sub_col(Sp, Sp, m_new); exp2(Sp, Sp);
-        mul(l_i, l_i, alpha); col_sum(l_i, Sp, l_i);
-        mul_col(acc, acc, alpha);
-        PbT pb; copy(pb, Sp);
+        col_max(m_new, Sp, m_i); SB();
+        sub(alpha, m_i, m_new); exp2(alpha, alpha); SB();
+        sub_col(Sp, Sp, m_new); exp2(Sp, Sp); SB();
+        mul(l_i, l_i, alpha); col_sum(l_i, Sp, l_i); SB();
+        mul_col(acc, acc, alpha); SB();
+        PbT pb; copy(pb, Sp); SB();
         store(ps[warpid], pb); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
         PopT pop; load(pop, ps[warpid]); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
         VT v_l; load(v_l, ks[vbuf]); asm volatile("s_waitcnt lgkmcnt(0)"); SB();
         mma_AtB(acc, v_l, pop, acc); SB();
-        copy(m_i, m_new);
+        copy(m_i, m_new); SB();
     };
 
     // prologue: gather tile 0 + tile 1 (assumes nt>=2)
@@ -186,8 +190,8 @@ __global__ void hk_fwd5(const g_t g){
         const int cur = t & 1, nxt = (t + 1) & 1;
         asm volatile("s_waitcnt vmcnt(0)"); SB();             // tile t+1 (buf nxt) gather done
         __syncthreads(); SB();
-        ST S_cur; qk(S_cur, nxt, topk_all + (t+1)*TILE_K);    // QK(tile t+1) [MFMA]
-        softmax_pv(S_prev, cur);                              // softmax+PV(tile t) [overlaps QK]
+        ST S_cur; qk(S_cur, nxt, topk_all + (t+1)*TILE_K); SB();   // QK(tile t+1)
+        softmax_pv(S_prev, cur);                              // softmax+PV(tile t)
         __syncthreads(); SB();                                // all warps done reading buf cur
         if (t + 2 < nt) {                                     // gather tile t+2 into freed buf cur (async)
             gather_async<NT>(ks[cur],  g.KVg, topk_all + (t+2)*TILE_K, 0,   g.t_kv);
