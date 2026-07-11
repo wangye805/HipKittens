@@ -5,7 +5,10 @@ import tk_kernel_bkwd_prep
 
 torch.manual_seed(0)
 N = int(os.environ.get("NN", "512"))
-B, H, H_KV, D = 1, 8, 1, int(os.environ.get("DD","64"))
+B = int(os.environ.get("BB", "1"))
+H = int(os.environ.get("HH", "8"))
+H_KV = int(os.environ.get("HKV", "1"))
+D = int(os.environ.get("DD","64"))
 dev, dt = 'cuda', torch.bfloat16
 
 def robust(ref, pred):
