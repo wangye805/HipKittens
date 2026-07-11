@@ -19,7 +19,7 @@ constexpr int GROUP_SIZE = ATTN_H / ATTN_H_KV; // queries per KV head group
 constexpr int ATTN_N = 8192; // sequence length
 #endif
 
-constexpr int ATTN_D = 128; // dimension
+constexpr int ATTN_D = 64; // dimension
 constexpr int STEP_QO = 64; // block size for QO
 constexpr int BLOCK_SIZE_KV = 256; // block size for KV
 constexpr int SLICE_QO = 32;
@@ -35,14 +35,14 @@ using namespace kittens;
 
 template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using qo_tile = rt<T, DOT_SLICE_QO, D, L, S>;
 template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using kv_tile = rt<T, WARP_SIZE_KV, D, L, S>;
-template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using qo_tile_T_dq = rt<T, 32, 16, L, S>;
-template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using qo_tile_dq = rt<T, 16, 32, L, S>;
+template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using qo_tile_T_dq = rt<T, 16, 16, L, S>;
+template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using qo_tile_dq = rt<T, 16, 16, L, S>;
 template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using kv_tile_T = rt<T, D, WARP_SIZE_KV, L, S>;
 template<int D, typename T=float, typename L=col_l, typename S=rt_16x16_s> using attn_tile = rt<T, DOT_SLICE_QO, WARP_SIZE_KV, L, S>;
 template<int D, typename T=bf16, typename L=col_l, typename S=rt_16x16_s> using attn_tile_T = rt<T, WARP_SIZE_KV, DOT_SLICE_QO, L, S>;
 
 template<int D, typename T=bf16, typename L=col_l, typename S=rt_32x16_s> using attn_tile_T_dq = rt<T, 256, 16, L, S>;
-template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using kv_tile_dq = rt<T, 256, 32, L, S>;
+template<int D, typename T=bf16, typename L=row_l, typename S=rt_16x32_s> using kv_tile_dq = rt<T, 256, 16, L, S>;
 
 template<int D> struct attn_bwd_combined_globals { 
     gl<bf16, -1, -1, -1, -1> Q, K, V;
@@ -73,7 +73,7 @@ __device__ inline static void atomic_pk_add_bf16_with_warpid(const GL &dst, cons
 
     // int col_offset = (laneid/src.tile_size_row) * 4 + warpid * 16;
     // int row_offset = laneid%(src.tile_size_row);
-    int lane_offset = laneid * 2 + warpid * 512;
+    int lane_offset = laneid * 2 + warpid * 256;
 
     #pragma unroll
     for(int i = 0; i < src.height; i++) {
@@ -235,7 +235,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
             // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
             auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
             store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             __builtin_amdgcn_s_setprio(1);
             P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
             mma_AtB(dV_j_T, dO_i_col, P_ij_bf16_col, dV_j_T);
@@ -301,7 +301,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
             // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
             auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
             store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
             mma_AtB(dV_j_T, dO_i_col, P_ij_bf16_col, dV_j_T);
             dP_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(dP_ij_bf16);
@@ -365,7 +365,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
             // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
             auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
             store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
             mma_AtB(dV_j_T, dO_i_col, P_ij_bf16_col, dV_j_T);
             dP_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(dP_ij_bf16);
@@ -427,7 +427,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
 
             auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
             store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             // 12. dV_j += P_ij^T @ dO_i
             // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
             P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
@@ -503,7 +503,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
 
             // 12. dV_j += P_ij^T @ dO_i
             // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             mul(dP_ij, dP_ij, P_ij);
             copy(dP_ij_bf16, dP_ij);
             transpose(dP_ij_bf16_accum_row, dP_ij_bf16);
@@ -567,7 +567,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
             __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_sched_barrier(0);
 
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             mul(dP_ij, dP_ij, P_ij);
             copy(dP_ij_bf16, dP_ij);
             transpose(dP_ij_bf16_accum_row, dP_ij_bf16);
@@ -632,7 +632,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
             __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_sched_barrier(0);
 
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             mul(dP_ij, dP_ij, P_ij);
             copy(dP_ij_bf16, dP_ij);
             transpose(dP_ij_bf16_accum_row, dP_ij_bf16);
@@ -697,7 +697,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
             __builtin_amdgcn_s_barrier();
             __builtin_amdgcn_sched_barrier(0);
 
-            load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+            load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
             mul(dP_ij, dP_ij, P_ij);
             copy(dP_ij_bf16, dP_ij);
             transpose(dP_ij_bf16_accum_row, dP_ij_bf16);
@@ -776,7 +776,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
         // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
         auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
         store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-        load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+        load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
         P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
         mma_AtB(dV_j_T, dO_i_col, P_ij_bf16_col, dV_j_T);
         dP_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(dP_ij_bf16);
@@ -839,7 +839,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
         // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
         auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
         store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-        load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+        load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
         P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
         mma_AtB(dV_j_T, dO_i_col, P_ij_bf16_col, dV_j_T);
         dP_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(dP_ij_bf16);
@@ -902,7 +902,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
         // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
         auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
         store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-        load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+        load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
         P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
         mma_AtB(dV_j_T, dO_i_col, P_ij_bf16_col, dV_j_T);
         dP_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(dP_ij_bf16);
@@ -965,7 +965,7 @@ __global__ void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
         // 16. dK_j += dS_ij^T @ Q_i   (128x64)=(128x16)x(16x64)
         auto attn_i_smem_subtile = subtile_inplace<WARP_SIZE_KV, DOT_SLICE_QO>(attn_i_smem, {warpid, 0});
         store(attn_i_smem_subtile, dP_ij_bf16_accum_row);
-        load(K_j_col, subtile_inplace<256, 32>(K_j_smem, {0, warpid}));
+        load(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}));
         P_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(P_ij_bf16);
         mma_AtB(dV_j_T, dO_i_col, P_ij_bf16_col, dV_j_T);
         dP_ij_bf16_col = swap_layout_inplace<col_l, rt_16x32_s>(dP_ij_bf16);
