@@ -21,6 +21,7 @@ constexpr int ATTN_N = 1024; // sequence length
 #endif
 
 constexpr int ATTN_D = 64; // dimension
+constexpr bool causal = true;
 constexpr int STEP_QO = 64; // block size for QO
 constexpr int BLOCK_SIZE_KV = 256; // block size for KV
 constexpr int SLICE_QO = 32;
