@@ -46,18 +46,24 @@ template<int D> struct attn_bwd_combined_globals {
 
 
 template<int D> __launch_bounds__(NUM_THREADS, 1)
-__global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
+__global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(const attn_bwd_combined_globals<D> g) {
 
-  const int kv_head_idx  = blockIdx.x;
-  const int seq_idx = blockIdx.z; // This is the KV head index
+  const int kv_head_idx = blockIdx.x;  // This is the KV head index
+  const int seq_idx = blockIdx.z;
   const int batch_idx = blockIdx.y;
   const int first_q_head = kv_head_idx * GROUP_SIZE;
 
   const int warpid = kittens::warpid();
   const int j = seq_idx * NUM_WARPS + warpid;
 
-  const int num_steps_per_head = ATTN_N / STEP_QO;
+  // causal loop-bound optimization: skip Q steps entirely above the diagonal
+  const int total_steps_per_head = ATTN_N / STEP_QO;
+  const int j_min = seq_idx * NUM_WARPS;
+  const int k_start_min = j_min * WARP_SIZE_KV;
+  const int first_step = max(0, k_start_min / STEP_QO);
+  const int num_steps_per_head = total_steps_per_head - first_step;
   const int num_steps = num_steps_per_head * GROUP_SIZE;
+  const int k_pos = j * WARP_SIZE_KV;
 
   constexpr float L_SCALE_FACTOR = 1.44269504089f;
   constexpr float P_SCALE_FACTOR = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
@@ -113,6 +119,10 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
   art<bf16, WARP_SIZE_KV, D, row_l, rt_16x32_s, V_ranges> V_j; // 64 registers
   constexpr int L_i = 126;
   constexpr int delta_i = 127;
+  constexpr int neg_inf_v = 29;
+  // Move -inf to VGPR neg_inf_v (for causal masking)
+  kittens::macros::clobber_gpr<neg_inf_v>();
+  kittens::macros::v_mov_b32_up2p<neg_inf_v>(0xff800000);
 
   art<float, DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s, P_ranges> P_ij; // 16 registers
   art<float, DOT_SLICE_QO, WARP_SIZE_KV, col_l, rt_16x16_s, dP_ranges> dP_ij; // 16 registers
@@ -151,12 +161,12 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
   load<1>(V_j, g.V, {batch_idx, 0, kv_head_idx, 0}, {0, j, 0, 0});
 
   // Load Q, dO, L, delta for this specific query head
-  load(L_smem[tic], g.L_vec, {batch_idx, first_q_head, 0, 0});
-  load(delta_smem[tic], g.delta_vec, {batch_idx, first_q_head, 0, 0});
-  G::load<1, false>(Q_i_smem[tic][0], g.Q, {batch_idx, 0, first_q_head, 0}, swizzled_offsets_Q_dO);
-  G::load<1, false>(dO_i_smem[tic][0], g.dOg, {batch_idx, 0, first_q_head, 0}, swizzled_offsets_Q_dO);
-  G::load<1, false>(Q_i_smem[tic][1], g.Q, {batch_idx, 1, first_q_head, 0}, swizzled_offsets_Q_dO);
-  G::load<1, false>(dO_i_smem[tic][1], g.dOg, {batch_idx, 1, first_q_head, 0}, swizzled_offsets_Q_dO);
+  load(L_smem[tic], g.L_vec, {batch_idx, first_q_head, 0, first_step});
+  load(delta_smem[tic], g.delta_vec, {batch_idx, first_q_head, 0, first_step});
+  G::load<1, false>(Q_i_smem[tic][0], g.Q, {batch_idx, first_step * 2 + 0, first_q_head, 0}, swizzled_offsets_Q_dO);
+  G::load<1, false>(dO_i_smem[tic][0], g.dOg, {batch_idx, first_step * 2 + 0, first_q_head, 0}, swizzled_offsets_Q_dO);
+  G::load<1, false>(Q_i_smem[tic][1], g.Q, {batch_idx, first_step * 2 + 1, first_q_head, 0}, swizzled_offsets_Q_dO);
+  G::load<1, false>(dO_i_smem[tic][1], g.dOg, {batch_idx, first_step * 2 + 1, first_q_head, 0}, swizzled_offsets_Q_dO);
   __builtin_amdgcn_s_waitcnt(0);
   __builtin_amdgcn_s_barrier();
   __builtin_amdgcn_sched_barrier(0);
@@ -180,10 +190,11 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
   // Prologue
   {
     const int q_head_idx = 0 / num_steps_per_head + first_q_head;
-    const int q_seq_idx = 0 % num_steps_per_head;
+    const int q_seq_idx = (0 % num_steps_per_head) + first_step;
+    const int q_pos = q_seq_idx * STEP_QO;
 
     const int next_q_head_idx = (0 + 1) / num_steps_per_head + first_q_head;
-    const int next_q_seq_idx = (0 + 1) % num_steps_per_head;
+    const int next_q_seq_idx = ((0 + 1) % num_steps_per_head) + first_step;
 
     // dot slice 0
     {
@@ -251,6 +262,16 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 0, neg_inf_v>(P_ij, P_ij);
+            mov<0, 1, neg_inf_v>(P_ij);
+            mov<0, 2, neg_inf_v>(P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -431,6 +452,15 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 1, neg_inf_v>(P_ij, P_ij);
+            mov<0, 2, neg_inf_v>(P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -610,6 +640,14 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 2, neg_inf_v>(P_ij, P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -789,6 +827,13 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 3, neg_inf_v>(P_ij, P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -926,13 +971,14 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
   // 9. for 1 <= i <= T_r (1024 / 32 = 32)  
   for (int i = 1; i < num_steps - 1; ++i, tic ^= 1, toc ^= 1) {
     const int last_q_head_idx = (i - 1) / num_steps_per_head + first_q_head;
-    const int last_q_seq_idx = (i - 1) % num_steps_per_head;
+    const int last_q_seq_idx = ((i - 1) % num_steps_per_head) + first_step;
 
     const int q_head_idx = i / num_steps_per_head + first_q_head;
-    const int q_seq_idx = i % num_steps_per_head;
+    const int q_seq_idx = (i % num_steps_per_head) + first_step;
+    const int q_pos = q_seq_idx * STEP_QO;
 
     const int next_q_head_idx = (i + 1) / num_steps_per_head + first_q_head;
-    const int next_q_seq_idx = (i + 1) % num_steps_per_head;
+    const int next_q_seq_idx = ((i + 1) % num_steps_per_head) + first_step;
 
     // dot slice 0
     {
@@ -982,6 +1028,16 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 0, neg_inf_v>(P_ij, P_ij);
+            mov<0, 1, neg_inf_v>(P_ij);
+            mov<0, 2, neg_inf_v>(P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -1164,6 +1220,15 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 1, neg_inf_v>(P_ij, P_ij);
+            mov<0, 2, neg_inf_v>(P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -1343,6 +1408,14 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 2, neg_inf_v>(P_ij, P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -1522,6 +1595,13 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 3, neg_inf_v>(P_ij, P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -1656,10 +1736,11 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
   }
 
   const int last_q_head_idx = (num_steps - 2) / num_steps_per_head + first_q_head;
-  const int last_q_seq_idx = (num_steps - 2) % num_steps_per_head;
+  const int last_q_seq_idx = ((num_steps - 2) % num_steps_per_head) + first_step;
 
   const int q_head_idx = (num_steps - 1) / num_steps_per_head + first_q_head;
-  const int q_seq_idx = (num_steps - 1) % num_steps_per_head;
+  const int q_seq_idx = ((num_steps - 1) % num_steps_per_head) + first_step;
+  const int q_pos = q_seq_idx * STEP_QO;
   // Epilogue
   {
     // dot slice 0
@@ -1709,6 +1790,16 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 0, neg_inf_v>(P_ij, P_ij);
+            mov<0, 1, neg_inf_v>(P_ij);
+            mov<0, 2, neg_inf_v>(P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -1887,6 +1978,15 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 1, neg_inf_v>(P_ij, P_ij);
+            mov<0, 2, neg_inf_v>(P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -2065,6 +2165,14 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 2, neg_inf_v>(P_ij, P_ij);
+            mov<0, 3, neg_inf_v>(P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
@@ -2244,6 +2352,13 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       load<0, 0>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       load<0, 1>(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_col_addr);
       mma_ABt<0, 3, 1>(P_ij, Q_i, K_j, P_ij);
+      if constexpr (causal) {
+        if (q_pos < k_pos) {
+          mov<neg_inf_v>(P_ij);
+        } else if (q_pos == k_pos) {
+          make_causal<0, 3, neg_inf_v>(P_ij, P_ij);
+        }
+      }
       sub_row<0, 1, L_i>(P_ij, P_ij);
       asm volatile("s_waitcnt lgkmcnt(8)");
       mul<0, 2>(P_ij, P_ij, P_SCALE_FACTOR);
