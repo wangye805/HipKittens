@@ -45,6 +45,11 @@ torch.cuda.synchronize()
 cv,l2v = robust(dV_ref,dV_tk); ck,l2k = robust(dK_ref,dK_tk); cq,l2q = robust(dQ_ref,dQ_tk)
 print(f"N={N}  dV: cos={cv:.6f}  dK: cos={ck:.6f}  dQ: cos={cq:.6f} rel_l2={l2q:.4f}")
 
+# atomic-vs-shuffle: does scratch dQ_in hold correct values (layout-independent)?
+si=dQ_in.flatten().float().sort().values; sr=dQ_ref.flatten().float().sort().values
+cs=torch.nn.functional.cosine_similarity(si,sr,dim=0).item()
+print(f"[scratch] dQ_in vs dQ_ref sorted(multiset): cos={cs:.6f}  (~1 => atomic OK, shuffle transposes wrong)")
+
 # per-D-col cos (is it the cols=0,1 mod4 transpose_2d<1,1> pattern?)
 a=dQ_tk[0].float().reshape(-1,D); b=dQ_ref[0].float().reshape(-1,D)
 an=a/(a.norm(dim=0,keepdim=True)+1e-9); bn=b/(b.norm(dim=0,keepdim=True)+1e-9)
