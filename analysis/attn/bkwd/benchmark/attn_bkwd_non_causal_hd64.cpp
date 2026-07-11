@@ -379,12 +379,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -562,12 +558,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -745,12 +737,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -927,12 +915,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -1126,12 +1110,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
 
       asm volatile("s_waitcnt lgkmcnt(2)");
@@ -1311,12 +1291,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -1494,12 +1470,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -1676,12 +1648,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -1867,12 +1835,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -2049,12 +2013,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }
@@ -2232,12 +2192,8 @@ __global__ __attribute__((amdgpu_num_vgpr(30))) void attend_bwd_combined_ker(con
       // load(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}));
       load<0, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<0, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 0>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 1>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       load<1, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<1, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
-      mul<0, 0, 2>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
-      mul<0, 0, 3>(dQ_i_T, dQ_i_T, dP_SCALE_FACTOR);
       asm volatile("s_waitcnt lgkmcnt(10)");
       asm volatile("s_waitcnt lgkmcnt(2)");
     }

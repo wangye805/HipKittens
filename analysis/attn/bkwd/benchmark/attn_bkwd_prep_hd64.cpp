@@ -124,6 +124,12 @@ __device__ inline static void load_shuffled_hd64(RT &dst, const GL &src, const C
                 uint32_t val = llvm_amdgcn_raw_buffer_load_b32(
                     std::bit_cast<i32x4>(br), flat * sizeof(U), 0, 0);
                 U2 pair = *reinterpret_cast<U2*>(&val);
+                // Fold softmax sm_scale (1/sqrt(64)=0.125, exact power of 2 in bf16) here:
+                // the main kernel's in-register mul on the 16x16 col_l dQ_i_T corrupts the
+                // MFMA-output registers, so dQ leaves the main kernel unscaled (8x). Scaling
+                // the natural (D,D+1) pair on read is uniform and lossless.
+                pair.x = (U)(((float)pair.x) * 0.125f);
+                pair.y = (U)(((float)pair.y) * 0.125f);
                 dst.tiles[i][j].data[k] = base_types::convertor<T2, U2>::convert(pair);
             }
         }
