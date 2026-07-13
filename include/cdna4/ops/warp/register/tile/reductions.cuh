@@ -66,6 +66,20 @@ __device__ static inline void row_reduce(V &row_accum, const T &src, const V &sr
         } else if constexpr (std::is_same_v<RT, float> && T::base_tile_rows == 32) {
             uint2_t res = __builtin_amdgcn_permlane32_swap(__float_as_uint(accum_single), __float_as_uint(accum_single), false, true);
             accum_single = op::template op<RT>(__uint_as_float(res.x), __uint_as_float(res.y));
+#ifdef HK_PERMLANE_REDUCE
+        } else if constexpr (std::is_same_v<RT, float> && T::base_tile_rows == 16) {
+            // 16-row tile in a 64-wave -> reduce 4 lane-groups {h,h+16,h+32,h+48} via lane-swap net (NO LDS, NO broadcast)
+            uint2_t r32 = __builtin_amdgcn_permlane32_swap(__float_as_uint(accum_single), __float_as_uint(accum_single), false, true);
+            accum_single = op::template op<RT>(__uint_as_float(r32.x), __uint_as_float(r32.y));   // stride-32 (h<->h+32)
+            uint2_t r16 = __builtin_amdgcn_permlane16_swap(__float_as_uint(accum_single), __float_as_uint(accum_single), false, true);
+            accum_single = op::template op<RT>(__uint_as_float(r16.x), __uint_as_float(r16.y));   // stride-16 (h<->h+16) -> full max in all lanes
+        } else {
+            for (int shift = max_shift; shift > 0; shift--) {
+                accum_single = op::template op<RT>(accum_single, __shfl_down(accum_single, shift * T::base_tile_rows));
+            }
+            accum_single = __shfl(accum_single, leader);
+        }
+#else
         } else {
             for (int shift = max_shift; shift > 0; shift--) {
                 accum_single = op::template op<RT>(accum_single, __shfl_down(accum_single, shift * T::base_tile_rows));
@@ -73,6 +87,7 @@ __device__ static inline void row_reduce(V &row_accum, const T &src, const V &sr
 
             accum_single = __shfl(accum_single, leader);
         }
+#endif
 
         if(reset) {
             row_accum[i][0] = accum_single;
@@ -292,6 +307,20 @@ __device__ static inline void col_reduce(V &col_accum, const T &src, const V &sr
         } else if constexpr (std::is_same_v<RT, float> && T::base_tile_cols == 32) {
             uint2_t res = __builtin_amdgcn_permlane32_swap(__float_as_uint(accum_single), __float_as_uint(accum_single), false, true);
             accum_single = op::template op<RT>(__uint_as_float(res.x), __uint_as_float(res.y));
+#ifdef HK_PERMLANE_REDUCE
+        } else if constexpr (std::is_same_v<RT, float> && T::base_tile_cols == 16) {
+            // 16-col tile: reduce 4 lane-groups {h,h+16,h+32,h+48} via lane-swap net (NO LDS, NO broadcast)
+            uint2_t r32 = __builtin_amdgcn_permlane32_swap(__float_as_uint(accum_single), __float_as_uint(accum_single), false, true);
+            accum_single = op::template op<RT>(__uint_as_float(r32.x), __uint_as_float(r32.y));   // stride-32 (h<->h+32)
+            uint2_t r16 = __builtin_amdgcn_permlane16_swap(__float_as_uint(accum_single), __float_as_uint(accum_single), false, true);
+            accum_single = op::template op<RT>(__uint_as_float(r16.x), __uint_as_float(r16.y));   // stride-16 (h<->h+16) -> full result in all lanes
+        } else {
+            for (int shift = max_shift; shift > 0; shift--) {
+                accum_single = op::template op<RT>(accum_single, __shfl_down(accum_single, shift * T::base_tile_cols));
+            }
+            accum_single = __shfl(accum_single, leader);
+        }
+#else
         } else {
             for (int shift = max_shift; shift > 0; shift--) {
                 accum_single = op::template op<RT>(accum_single, __shfl_down(accum_single, shift * T::base_tile_cols));
@@ -299,6 +328,7 @@ __device__ static inline void col_reduce(V &col_accum, const T &src, const V &sr
 
             accum_single = __shfl(accum_single, leader);
         }
+#endif
 
         if(reset) {
             col_accum[j][0] = accum_single;
