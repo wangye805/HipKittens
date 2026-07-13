@@ -83,7 +83,17 @@ __global__ void hk_s2_occ2(const g_t g){
     extern __shared__ alignment_dummy __shm[];
     shared_allocator al((int*)&__shm[0]);
     KS (&ks)[2] = al.allocate<KS, 2>();
-    __shared__ float Scomb[NW_MG][TILE_K * QB];      // S-combine scratch (per mg: lane*16 + local), 16KB
+#if defined(SYM_COMBINE)
+    // symmetric 1-barrier combine: both waves write disjoint slots, 1 barrier, both read+add in parallel.
+    #ifdef SYM_FP32
+    using SCT = float;                                        // 32KB (needs the LDS to fit)
+    #else
+    using SCT = __hip_bfloat16;                               // 16KB (bf16-rounds the partner's partial)
+    #endif
+    __shared__ SCT Scomb[NW_MG][2][TILE_K * QB];             // per (mg,dh): lane*16+local
+#else
+    __shared__ float Scomb[NW_MG][TILE_K * QB];      // 2-barrier fp32 combine scratch (per mg: lane*16+local), 16KB
+#endif
     __shared__ int topk_all[NTILES * TILE_K];
 
     const int warpid = kittens::warpid();
@@ -93,10 +103,18 @@ __global__ void hk_s2_occ2(const g_t g){
     const int tok = blockIdx.x;
     const int nt = g.n_tiles;
 
-    // Q resident as DC-wide chunks over THIS sub's D-half (loaded once; invariant across tiles)
-    QcT q_arr[NC];
+    // Q resident as DC-wide chunks. REDUNDANT_QK: full-D (both waves do full QK, NO S-combine).
+    // else split-K: this sub's D-half only (+ S-combine).
+#ifdef REDUNDANT_QK
+    constexpr int NQ = D / DC;                     // full D (=8 @ DC64)
+    #define QKCOL(c) (c)
+#else
+    constexpr int NQ = NC;                         // this sub's half (=4)
+    #define QKCOL(c) (dh*NC + (c))
+#endif
+    QcT q_arr[NQ];
     #pragma unroll
-    for (int c = 0; c < NC; c++) load(q_arr[c], g.Qg, coord<>{0, mg, 0, dh*NC + c});
+    for (int c = 0; c < NQ; c++) load(q_arr[c], g.Qg, coord<>{0, mg, 0, QKCOL(c)});
     __builtin_amdgcn_s_waitcnt(0);
 
     OT acc;
@@ -146,11 +164,11 @@ __global__ void hk_s2_occ2(const g_t g){
           constexpr int WK = RPC_K < 15 ? RPC_K : 15;
           constexpr int WKT = (WK + 4) < 15 ? (WK + 4) : 15;
           KcT kb0, kb1;
-          { typename KS::template subtile<TILE_K, DC> s0(ks[cur], {0, dh*NC + 0}); load(kb0, s0); }
+          { typename KS::template subtile<TILE_K, DC> s0(ks[cur], {0, QKCOL(0)}); load(kb0, s0); }
           #pragma unroll
-          for (int c = 0; c < NC; c++) {
-              if (c + 1 < NC) {
-                  typename KS::template subtile<TILE_K, DC> sn(ks[cur], {0, dh*NC + c + 1});
+          for (int c = 0; c < NQ; c++) {
+              if (c + 1 < NQ) {
+                  typename KS::template subtile<TILE_K, DC> sn(ks[cur], {0, QKCOL(c + 1)});
                   load((c & 1) ? kb0 : kb1, sn);
                   asm volatile("s_waitcnt lgkmcnt(%0)" :: "i"(WKT));
               } else {
@@ -163,9 +181,9 @@ __global__ void hk_s2_occ2(const g_t g){
         }
 #else
         #pragma unroll
-        for (int c = 0; c < NC; c++) {
+        for (int c = 0; c < NQ; c++) {
             KcT k_c;
-            typename KS::template subtile<TILE_K, DC> ksub(ks[cur], {0, dh*NC + c});
+            typename KS::template subtile<TILE_K, DC> ksub(ks[cur], {0, QKCOL(c)});
             load(k_c, ksub);
             asm volatile("s_waitcnt lgkmcnt(0)");
             SB();
@@ -177,6 +195,35 @@ __global__ void hk_s2_occ2(const g_t g){
         // ---- S-COMBINE: s_full = s_sub0 + s_sub1 (fp32, hand-rolled LDS, 2-barrier) ----
         // sub0 lane L and sub1 lane L hold IDENTICAL (key,query) elements in the same reg slots -> index by
         // (lane, local) only. local = bt*4 + p*2 + xy, bt in [0,height), p in [0,2), xy in {x,y}.
+#if defined(REDUNDANT_QK)
+        // no S-combine: both waves already hold the FULL-D score s (full QK done redundantly). Nothing to do.
+#elif defined(SYM_COMBINE)
+        // symmetric 1-barrier: each wave writes its partial (bf16) to its own slot, one barrier, then each
+        // reads the OTHER wave's partial and adds (my partial stays fp32; only the other's is bf16-rounded).
+        {
+          SCT* MY = &Scomb[mg][dh][0];
+          #pragma unroll
+          for (int bt = 0; bt < ST_::height; bt++)
+            #pragma unroll
+            for (int p = 0; p < 2; p++) {
+              MY[lane*16 + bt*4 + p*2 + 0] = (SCT)s.tiles[bt][0].data[p].x;
+              MY[lane*16 + bt*4 + p*2 + 1] = (SCT)s.tiles[bt][0].data[p].y;
+            }
+          asm volatile("s_waitcnt lgkmcnt(0)");   // LDS stores must LAND before the barrier (else cross-wave race)
+          SB();
+          __syncthreads();
+          SB();
+          SCT* OT_ = &Scomb[mg][1-dh][0];
+          #pragma unroll
+          for (int bt = 0; bt < ST_::height; bt++)
+            #pragma unroll
+            for (int p = 0; p < 2; p++) {
+              s.tiles[bt][0].data[p].x += (float)OT_[lane*16 + bt*4 + p*2 + 0];
+              s.tiles[bt][0].data[p].y += (float)OT_[lane*16 + bt*4 + p*2 + 1];
+            }
+          SB();
+        }
+#elif !defined(NO_COMBINE)
         {
           float* SC = &Scomb[mg][0];
           if (dh == 1) {
@@ -188,6 +235,7 @@ __global__ void hk_s2_occ2(const g_t g){
                 SC[lane*16 + bt*4 + p*2 + 1] = s.tiles[bt][0].data[p].y;
               }
           }
+          asm volatile("s_waitcnt lgkmcnt(0)");   // dh==1 stores must LAND before barrier A
           SB();
           __syncthreads();                        // barrier A: sub1's partial visible
           SB();
@@ -202,6 +250,7 @@ __global__ void hk_s2_occ2(const g_t g){
                 SC[lane*16 + bt*4 + p*2 + 1] = s.tiles[bt][0].data[p].y;
               }
           }
+          asm volatile("s_waitcnt lgkmcnt(0)");   // dh==0's full-s stores must LAND before barrier B
           SB();
           __syncthreads();                        // barrier B: full s visible
           SB();
@@ -216,6 +265,10 @@ __global__ void hk_s2_occ2(const g_t g){
           }
           SB();
         }
+#else
+        __syncthreads();   // NO_COMBINE ablation: keep one barrier for a fair-ish cadence (INCORRECT math)
+        SB();
+#endif
 
         mul(s, s, g.scale);
         SB();
