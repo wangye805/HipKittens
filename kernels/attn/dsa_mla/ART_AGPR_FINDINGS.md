@@ -21,11 +21,26 @@ hazard (mma reads its own operand). acc/K stay VGPR.
 - Load from **shared** (no global→art simple load): `addr=get_address(art, st_subtile); load<0,N>(art, st_subtile, addr)` for N=0..#sub-ranges-1. Loads a bf16 row-layout tile straight into its pinned regs (AGPR if ranged there).
 - mma: `mma_ABt(D,A,B,C)` (looping) or `mma_ABt<N,M,K>(...)` — ALL operands must be `art`; D col_l, A/B row_l. Normal `rt` `mma_ABt` rejects art.
 
-## Remaining for full integration (into hk_s2_occ1_stream QK)
-1. **art store of col_l fp32 `s`**: the art store to shared requires row-major + `st_16x16_swizzled_s` + b64 (2-reg) split — the same relayout as the P-roundtrip. In the real kernel `s` is *not* stored — it feeds mask/softmax. Need: either the softmax ops accept `art s`, or convert `art s → rt s` after the mma (cheap, both VGPR).
-2. **K as art** (VGPR ranges) + **double-buffer** in art (kb0/kb1 as art with distinct VGPR ranges), streamed via `load<0,N>` per chunk.
-3. **Q as art in AGPR**, resident (q_arr[NCH] → art with AGPR ranges), loaded once.
-4. Thread `mma_ABt<N,M,K>` split indices through the D-chunk loop.
-5. Manual register map: acc VGPR (128), K-dbuf VGPR, Q AGPR (64), s VGPR — non-overlapping ranges + clobber.
+## The handoff blocker (definitive)
+`art` is a **phantom/assembly-only type — NO `.data`/`.tiles` members**; data lives only in the pinned
+physical registers, touched solely by assembly-mode ops (`load<N,M>`, `mma_ABt<N,M,K>`, `store<N,M>`,
+`maps.cuh` element/reduce ops). There is **no cheap `art→rt` conversion** (the `copy` in
+`assembly/conversions.cuh` is art→art fp32→bf16, not art→rt). So the QK mma output `s` (col_l fp32,
+art) cannot be handed to the existing **rt-based** mask/softmax/reshuffle path by a field copy.
 
-Expected: QK peak VGPR 296→232, AGPR-overflow ferries gone. Branch `dsa-mla-fwd-art-agpr`.
+Two ways to actually integrate, both costly:
+- **(a) Full-art fwd**: rewrite mask/softmax/reshuffle/PV in `art` ops (like `analysis/attn/bkwd`, ~300
+  lines assembly-mode). Cleanest, but a big rewrite.
+- **(b) Round-trip `s` art→shared→rt**: adds a per-tile LDS round-trip for `s` (and the col_l art store
+  needs row-major + `st_16x16_swizzled_s` + b64 split — a relayout, like the P-roundtrip). This new cost
+  likely negates the Q-in-AGPR VGPR benefit.
+
+## Cost/benefit
+Benefit = QK-peak VGPR 296→232 + AGPR-overflow ferries gone (~100-200 cyc/tile) + unblocks gather-interleave.
+It does **NOT** reach occ-2 (that's LDS-bound, orthogonal). So it's a **modest occ-1 gain requiring a large
+full-art rewrite** (option a). Recommend weighing against occ-2 (higher-value structural lever) before
+committing to the full-art fwd. Mechanism is proven (probe_art: Q in AGPR, mma reads it natively, no ferry).
+
+Remaining pieces if pursued (option a): K/V/Q as art (Q→AGPR ranges, K/V→VGPR, double-buffered),
+mask/softmax/reshuffle in `maps.cuh` art ops, manual non-overlapping register map + `clobber`, thread
+`mma_ABt<N,M,K>` split indices through the D-chunk loop. Branch `dsa-mla-fwd-art-agpr`.
