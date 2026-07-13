@@ -37,8 +37,8 @@ __global__ void probe(gl<bf16,-1,-1,-1,-1> gK, gl<bf16,-1,-1,-1,-1> gQ, gl<float
     { auto qsub0 = subtile_inplace<16,64>(Qs, {0,0}); uint32_t a=get_address(q0,qsub0); load<0,0>(q0,qsub0,a); load<0,1>(q0,qsub0,a); }
     { auto qsub1 = subtile_inplace<16,64>(Qs, {0,1}); uint32_t a=get_address(q1,qsub1); load<0,0>(q1,qsub1,a); load<0,1>(q1,qsub1,a); }
     // K chunks (VGPR)
-    { auto ks0 = subtile_inplace<64,64>(Ks, {0,0}); uint32_t a=get_address(k0,ks0); load<0,0>(k0,ks0,a); load<0,1>(k0,ks0,a); load<0,2>(k0,ks0,a); load<0,3>(k0,ks0,a); load<0,4>(k0,ks0,a); load<0,5>(k0,ks0,a); load<0,6>(k0,ks0,a); load<0,7>(k0,ks0,a); }
-    { auto ks1 = subtile_inplace<64,64>(Ks, {0,1}); uint32_t a=get_address(k1,ks1); load<0,0>(k1,ks1,a); load<0,1>(k1,ks1,a); load<0,2>(k1,ks1,a); load<0,3>(k1,ks1,a); load<0,4>(k1,ks1,a); load<0,5>(k1,ks1,a); load<0,6>(k1,ks1,a); load<0,7>(k1,ks1,a); }
+    { auto ks0 = subtile_inplace<64,64>(Ks, {0,0}); uint32_t a=get_address(k0,ks0); load<0,0>(k0,ks0,a); load<0,1>(k0,ks0,a); load<1,0>(k0,ks0,a); load<1,1>(k0,ks0,a); load<2,0>(k0,ks0,a); load<2,1>(k0,ks0,a); load<3,0>(k0,ks0,a); load<3,1>(k0,ks0,a); }
+    { auto ks1 = subtile_inplace<64,64>(Ks, {0,1}); uint32_t a=get_address(k1,ks1); load<0,0>(k1,ks1,a); load<0,1>(k1,ks1,a); load<1,0>(k1,ks1,a); load<1,1>(k1,ks1,a); load<2,0>(k1,ks1,a); load<2,1>(k1,ks1,a); load<3,0>(k1,ks1,a); load<3,1>(k1,ks1,a); }
     __builtin_amdgcn_s_waitcnt(0);
     zero(s);
     mma_ABt(s, k0, q0, s);

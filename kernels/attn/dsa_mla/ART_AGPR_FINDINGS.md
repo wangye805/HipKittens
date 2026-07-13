@@ -82,3 +82,18 @@ Bugs the test caught (both invisible to the earlier ISA-only checks):
 
 Lesson: ISA validation proves *placement*, NOT *correctness* — numeric block tests are mandatory for
 assembly-mode art. The test-first setup is working as intended.
+
+## UPDATE — Piece 2 PASS (art col_max/col_sum numerically correct)
+
+probe_art_reduce: QK-art (Q->AGPR) -> art_col_max/col_sum -> compare CPU = worst 0.0000 PASS.
+This also numerically validates QK-art (s correct). art_col_max/col_sum work: v_mov_b32_p2up<reg>
+reads each S_ranges reg -> local C++ reduce -> permlane32+permlane16 butterfly; lane->query = L%16,
+all 16 queries exact.
+
+KEY API BUG found (fixed in both probes): **art `load<N,M>` indexes (height, width), NOT flat.**
+K [64,64] rt_16x32 = height 4 x width 2 -> load<0,0>,load<0,1>,load<1,0>,...,load<3,1> (N=0..3,M=0..1),
+NOT flat load<0,0..7>. The flat version compiled + looked right in ISA but loaded wrong data (piece 1
+probe_art_qk had this bug, invisible to ISA-only). Reinforces: assembly-mode needs numeric tests.
+
+Pieces done: 1 (QK-art Q->AGPR, ferry-free) + 2 (art col_max/col_sum). Next: 3 softmax in art
+(exp2/sub_col/mul_col/add_row exist), 4 PV in art + full register map, then integrate into hk_s2_occ1_stream.

@@ -73,8 +73,8 @@ __global__ void probe(gl<bf16,-1,-1,-1,-1> gK, gl<bf16,-1,-1,-1,-1> gQ, gl<float
     S_art s; K0_art k0; K1_art k1; Q0_art q0; Q1_art q1;
     { auto q=subtile_inplace<16,64>(Qs,{0,0}); uint32_t a=get_address(q0,q); load<0,0>(q0,q,a); load<0,1>(q0,q,a); }
     { auto q=subtile_inplace<16,64>(Qs,{0,1}); uint32_t a=get_address(q1,q); load<0,0>(q1,q,a); load<0,1>(q1,q,a); }
-    { auto k=subtile_inplace<64,64>(Ks,{0,0}); uint32_t a=get_address(k0,k); load<0,0>(k0,k,a); load<0,1>(k0,k,a); load<0,2>(k0,k,a); load<0,3>(k0,k,a); load<0,4>(k0,k,a); load<0,5>(k0,k,a); load<0,6>(k0,k,a); load<0,7>(k0,k,a); }
-    { auto k=subtile_inplace<64,64>(Ks,{0,1}); uint32_t a=get_address(k1,k); load<0,0>(k1,k,a); load<0,1>(k1,k,a); load<0,2>(k1,k,a); load<0,3>(k1,k,a); load<0,4>(k1,k,a); load<0,5>(k1,k,a); load<0,6>(k1,k,a); load<0,7>(k1,k,a); }
+    { auto k=subtile_inplace<64,64>(Ks,{0,0}); uint32_t a=get_address(k0,k); load<0,0>(k0,k,a); load<0,1>(k0,k,a); load<1,0>(k0,k,a); load<1,1>(k0,k,a); load<2,0>(k0,k,a); load<2,1>(k0,k,a); load<3,0>(k0,k,a); load<3,1>(k0,k,a); }
+    { auto k=subtile_inplace<64,64>(Ks,{0,1}); uint32_t a=get_address(k1,k); load<0,0>(k1,k,a); load<0,1>(k1,k,a); load<1,0>(k1,k,a); load<1,1>(k1,k,a); load<2,0>(k1,k,a); load<2,1>(k1,k,a); load<3,0>(k1,k,a); load<3,1>(k1,k,a); }
     __builtin_amdgcn_s_waitcnt(0);
     zero(s); mma_ABt(s,k0,q0,s); mma_ABt(s,k1,q1,s);
     float m = art_col_max(s);
@@ -95,12 +95,10 @@ int main(){
     probe<<<1,64,65536>>>(gK,gQ,gM,gL); HC(hipDeviceSynchronize());
     std::vector<float> M(64),Lv(64); HC(hipMemcpy(M.data(),dM,4*64,hipMemcpyDeviceToHost)); HC(hipMemcpy(Lv.data(),dL,4*64,hipMemcpyDeviceToHost));
     // CPU: s[key][q]=sum_c K[key][c]*Q[q][c] (contraction 128); col_max/col_sum over 64 keys per query q
+    std::vector<double> cmx(16,-1e30), csm(16,0);
+    for(int q=0;q<16;q++){ for(int key=0;key<64;key++){ double v=0; for(int c=0;c<128;c++) v+=(double)(float)Kb[key*128+c]*(double)(float)Qb[q*128+c]; if(v>cmx[q])cmx[q]=v; csm[q]+=v; } }
     double worstM=0,worstL=0;
-    for(int L=0;L<64;L++){ int q=L%16;
-        double mx=-1e30,sm=0;
-        for(int key=0;key<64;key++){ double s=0; for(int c=0;c<128;c++) s+=(double)(float)Kb[key*128+c]*(double)(float)Qb[q*128+c]; if(s>mx)mx=s; sm+=s; }
-        worstM=fmax(worstM,fabs(M[L]-mx)); worstL=fmax(worstL,fabs(Lv[L]-sm));
-    }
+    for(int L=0;L<64;L++){ worstM=fmax(worstM,fabs(M[L]-cmx[L%16])); worstL=fmax(worstL,fabs(Lv[L]-csm[L%16])); }
     printf("art_col_max worst=%.4f  art_col_sum worst=%.4f  %s\n", worstM, worstL, (worstM<0.1&&worstL<0.5)?"PASS":"FAIL");
     return 0;
 }
