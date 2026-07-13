@@ -63,3 +63,22 @@ col_max/col_sum (permlane-butterfly, art-op style; same as the rt patch). All ot
 for art: exp2, mul, add/sub, add_row/sub_row, sub_col/mul_col, zero, copy.
 
 Remaining build order: (2) art col_max/col_sum, (3) softmax in art, (4) PV in art + full register map.
+
+## UPDATE — Piece 2 WIP (probe_art_reduce.cpp): test-first caught 2 real bugs
+
+Implemented art_col_max/art_col_sum via `macros::v_mov_b32_p2up<reg>()` (reads a pinned art register
+into a compiler value) → local reduce in C++ → permlane32+16 butterfly. Executable test: QK-art →
+reduce → store row_vec → compare CPU col_max/col_sum of K·Qᵀ.
+
+Bugs the test caught (both invisible to the earlier ISA-only checks):
+1. **Register placement (FIXED):** art tiles at low VGPRs (v[0:79]) corrupt the compiler's low regs
+   (v0=threadIdx, arg/address regs) → GPU memory-access fault. Fix: place art tiles HIGH (v[64:143]),
+   leave low VGPRs for the compiler — matches the bwd kernel (art at v[40:103], v0-39 free). RULE:
+   art register ranges must avoid the low VGPRs the compiler needs for addressing/threadIdx.
+2. **Numeric (OPEN):** after the fault fix it runs but col_max/col_sum are wrong (worst ~7 / ~62) —
+   bug is in one of {art load addressing (get_address/subtile), the looping mma_ABt, the reduction
+   axis/layout}, all previously validated only by ISA. Next: isolate via a known-pattern art-load
+   readback (verify get_address/load), then the mma output layout, then the reduce.
+
+Lesson: ISA validation proves *placement*, NOT *correctness* — numeric block tests are mandatory for
+assembly-mode art. The test-first setup is working as intended.
