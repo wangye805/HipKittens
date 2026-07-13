@@ -44,3 +44,22 @@ committing to the full-art fwd. Mechanism is proven (probe_art: Q in AGPR, mma r
 Remaining pieces if pursued (option a): K/V/Q as art (Q→AGPR ranges, K/V→VGPR, double-buffered),
 mask/softmax/reshuffle in `maps.cuh` art ops, manual non-overlapping register map + `clobber`, thread
 `mma_ABt<N,M,K>` split indices through the D-chunk loop. Branch `dsa-mla-fwd-art-agpr`.
+
+## UPDATE — Piece 1 (multi-chunk QK in art) VALIDATED (probe_art_qk.cpp)
+
+Full-contraction QK in art (2 D-chunks; scales to 8): s[64,16] = Σ_c K_c[64,64]·Q_c[16,64]ᵀ, with
+**Q resident in AGPR** (a[0:15]), K double-buffered in VGPR, s(acc) in VGPR. ISA confirms:
+- every Q chunk read from AGPR (`v_mfma v[s], v[K], a[Q], v[s]`), Q loaded straight to AGPR (`ds_read a[…]`),
+- **only 2 `accvgpr` in the whole kernel** (vs ~64 in the rt version) — the QK-feed is FERRY-FREE.
+
+So Q→AGPR eliminates the AGPR-overflow ferries that caused the +48-cyc mma bubbles at occ-1. Register
+map used: s=v[0:15], K0/K1=v[16:79], Q0..=a[0:15] (clobbered). Scaling to 8 chunks = 8 Q art tiles
+a[0:63] + K dbuf, mechanical.
+
+Reductions finding: the bwd works in art because it RECOMPUTES P=exp2(S−LSE) from the saved LSE →
+needs no reductions (just exp2+sub_row, which art has). The FORWARD needs col_max/col_sum, which are
+NOT in the art op set (bwd never needed them) — so the full-art fwd requires implementing art
+col_max/col_sum (permlane-butterfly, art-op style; same as the rt patch). All other softmax ops exist
+for art: exp2, mul, add/sub, add_row/sub_row, sub_col/mul_col, zero, copy.
+
+Remaining build order: (2) art col_max/col_sum, (3) softmax in art, (4) PV in art + full register map.
