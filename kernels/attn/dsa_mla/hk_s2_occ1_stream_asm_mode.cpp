@@ -70,8 +70,8 @@ static_assert(TILE_K==64 && DC==64 && QB==16 && D==512, "asm mode fixed to TILE_
 typedef uint32_t u2v __attribute__((ext_vector_type(2)));
 // Q lives as ONE full-width [QB,D] art tile in AGPR a[0:63] (16 k-tiles). K chunk -> v[64:95], s -> v[96:111].
 using Qf_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<256,319>>,4>;  // Q[16,512] whole (16 tiles)
-using Kc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<64,95>>,4>;    // K[64,64] rt_16x32 = 8 tiles
-using Sc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<96,111>>,4>;   // s[64,16] rt_16x16 = 4 tiles
+using Kc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<184,215>>,4>;   // K[64,64] high VGPR (disjoint from acc)
+using Sc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<216,231>>,4>;  // s[64,16] high VGPR
 using Qf_art = art<bf16,  QB, D,  row_l, rt_16x32_s, Qf_r>;
 using Kc_art = art<bf16,  TILE_K, DC, row_l, rt_16x32_s, Kc_r>;
 using Sc_art = art<float, TILE_K, QB, col_l, rt_16x16_s, Sc_r>;
@@ -167,7 +167,7 @@ __global__ void hk_s2_occ1_stream(const g_t g){
     // Q parked in AGPR (art): ONE full-width [QB,D] load from global (warpid must be UNIFORM or the
     // buffer resource lands in VGPRs -> invalid). K/s art clobbered for the QK mma.
     ducks::art::clobber<Qf_r>(); ducks::art::clobber<Kc_r>(); ducks::art::clobber<Sc_r>();
-    Qf_art qfull;
+    Qf_art qfull; Kc_art k_art; Sc_art sart;   // declared at top: liveness spans the loop -> disjoint from acc
     const int uw = __builtin_amdgcn_readfirstlane(warpid);
     load(qfull, g.Qg, coord<>{0,uw,0,0}, coord<>{0,0,0,0});
     __builtin_amdgcn_s_waitcnt(0);
@@ -216,7 +216,6 @@ __global__ void hk_s2_occ1_stream(const g_t g){
 #endif
 
         // ---- QK in assembly-mode art: Q in AGPR, K streamed into VGPR art, s art ----
-        Sc_art sart;
         zero(sart);
         SB();
         // HOIST tile-j topk read: issue now (16 ints via 4 ds_read_b128), keep in lgkmcnt slack through the
@@ -230,7 +229,6 @@ __global__ void hk_s2_occ1_stream(const g_t g){
         }
         SB();
         // stream K chunk c: load into a NORMAL rt (st_32x32 native), bridge to art K, chunked mma vs Qfull.
-        Kc_art k_art;
         #define QKC(c) { \
             KcT k_c; \
             typename KS::template subtile<TILE_K, DC> ksub(ks[cur], {0, (c)}); \

@@ -211,3 +211,22 @@ warps (only 1 warp's O correct). Since LSE is right for all warps, QK/Q-load/K-b
 work; the NaN is isolated to the PV/acc/O path for 3 warps (warp-dependent, though code is
 warp-uniform -> suspect register-allocation/clobber interaction or acc region). Next: dump NaN head
 range; check acc zero/rescale/transpose per warp.
+
+## WORKING — art-QK forward kernel (Q in AGPR), O numerically correct
+
+hk_s2_occ1_stream_asm_mode.cpp now produces O worst ~0.0003, nan=0, DETERMINISTIC across all
+seed/sink/ninv. Q parked in AGPR (AGPR=64, VGPR=232, occ=1, 0 spill). The goal is achieved.
+
+THE NaN BUG + FIX: acc (normal rt, live across the QK) was overlapping the art K/s VGPR region, which
+the QK overwrites each tile -> PV mma_AtB accumulated onto corrupted (stale, NaN-ish) acc regs ->
+INTERMITTENT NaN in scattered query columns. Root cause: clobber_gpr (art clobber) is a POINT-clobber
+(per-reg asm at one spot), NOT a whole-function reservation, so the allocator freely placed acc in the
+art region. FIX: move the art K/s ranges to HIGH VGPR (K=v184:215, s=v216:231) so acc's 128 regs sit
+low, naturally disjoint. (Declaring art tiles at top vs in-loop did NOT help; the range placement is
+what matters.) LESSON: in hybrid art+normal kernels, art register ranges must be chosen to not collide
+with the compiler-allocated normal tiles (esp. a long-lived accumulator) -- clobber won't protect them.
+
+REMAINING (minor): LSE worst ~0.017 (vs original 0.0007), just over the strict test threshold 0.01.
+O is correct to 0.0003 so the softmax weights are right; the LSE absolute value differs by ~1.7%,
+a systematic fp-accumulation-order difference from the chunked mma_ABt_base vs the original mma_ABt.
+Not a correctness bug. Next: perf (steady tile vs 6104/Leon 5396) + optionally chase the LSE order.

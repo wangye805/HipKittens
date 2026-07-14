@@ -41,18 +41,22 @@ int main(int argc,char**argv){
     std::vector<__hip_bfloat16> Ob(BH*D); std::vector<float> Lo(BH);
     HC(hipMemcpy(Ob.data(),dO,sizeof(__hip_bfloat16)*BH*D,hipMemcpyDeviceToHost));
     HC(hipMemcpy(Lo.data(),dL,sizeof(float)*BH,hipMemcpyDeviceToHost));
-    int nanc=0,g2=0,g3=0; double esum=0; long ecnt=0; float worst=0,lworst=0;
+    int nanc=0,g2=0,g3=0,lsenan=0; double esum=0; long ecnt=0; float worst=0,lworst=0;
+    std::vector<int> nan_per_head(BH,0); int first_nan_v0=-1,first_nan_v1=-1;
     for(int h=0;h<BH;h++){
         std::vector<float> s(NKK); float m=-1e30f;
         for(int kk=0;kk<NKK;kk++){int kr=topk[kk]; if(kr<0){s[kk]=-1e30f;continue;} float d=0;
             for(int q=0;q<D;q++) d+=bf(Q[h*D+q])*bf(KV[kr*D+q]); s[kk]=d*scale_nat; if(s[kk]>m)m=s[kk];}
         float l=0; for(int kk=0;kk<NKK;kk++){s[kk]=(s[kk]<=-1e29f)?0.f:std::exp(s[kk]-m); l+=s[kk];}
         float denom=has_sink?l+std::exp(sink[h]-m):l; float lse_ref=m+std::log(denom);
+        if(!(Lo[h]==Lo[h])) lsenan++;
         float le=std::fabs(lse_ref-Lo[h]); if(le>lworst)lworst=le;
         for(int v=0;v<D;v++){float a=0; for(int kk=0;kk<NKK;kk++){int kr=topk[kk]; if(kr<0)continue; a+=bf(s[kk])*bf(KV[kr*D+v]);}
-            float o=a/denom,hk=b2f(Ob[h*D+v]); if(!(hk==hk)){nanc++;continue;}
+            float o=a/denom,hk=b2f(Ob[h*D+v]); if(!(hk==hk)){nanc++; nan_per_head[h]++; if(h==0&&first_nan_v0<0)first_nan_v0=v; if(h==0)first_nan_v1=v; continue;}
             float e=std::fabs(hk-o); if(e>worst)worst=e; esum+=e; ecnt++; if(e>0.02f)g2++; if(e>0.03f)g3++;}
     }
+    { printf("  nan-per-head:"); for(int h=0;h<BH;h++) printf("%c", nan_per_head[h]==0?'.':(nan_per_head[h]==D?'F':'p')); printf("\n");
+      printf("  head0 nan v-range: [%d..%d] of %d  LSE_nan=%d\n", first_nan_v0, first_nan_v1, D, lsenan); }
     printf("HK_S2_OCC1_STREAM DC=%d nt=%d sink=%d ninv=%d seed=%d: O worst=%.5f mean=%.6f >.02=%d >.03=%d nan=%d | LSE worst=%.6f  %s\n",
            DC,NTILES,has_sink,ninv,seed,worst,ecnt?esum/ecnt:0,g2,g3,nanc,lworst,(g3==0&&nanc==0&&lworst<0.01f)?"PASS":"FAIL");
     return 0;
