@@ -261,3 +261,15 @@ REMAINING: deterministic LSE bias +0.0165 on every head (kernel LSE consistently
 denom~254 over 256 keys -> softmax denom ~1.66% too large, UNIFORMLY (O ratio ~unaffected, LSE
 log-absolute shows it). Systematic, not corruption. Next: compare art-QK s directly to ref K.Q^T to
 localize (chunked mma_ABt_base order? exp2? a uniform per-key inflation). Baseline LSE was 0.0007.
+
+## LSE bias localized: cross-tile l accumulation (grows with NTILES)
+
+Deterministic LSE bias vs NTILES: NT=1 +0.0029, NT=2 +0.0123, NT=4 +0.0168 (m constant ~0.0087).
+So it's a per-tile bias (~+0.003, already 4x baseline 0.0007) that COMPOUNDS across tiles via the
+running-denom update l_i = l_i*alpha + col_sum(P). The cross-tile logic is UNCHANGED from the original
+(only QK changed), so the art-QK s must differ from the normal-QK s by a small per-element amount that
+(a) cancels in the linear col-sum (probe showed raw-s col-sum EXACT 0.0000) but (b) biases the
+nonlinear exp2-denom and the alpha rescale, accumulating. O (a ratio) stays ~correct (worst 0.0003 vs
+orig 0.00009, 3x). Next: compare art-QK s to normal-QK s element-wise (not just col-sum) to find the
+per-element difference; likely the chunked mma_ABt_base accumulation order or an AGPR-operand rounding.
+STATUS: deterministic + O correct; LSE small systematic bias (0.003-0.017), not bit-parity with baseline.
