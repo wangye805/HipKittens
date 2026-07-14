@@ -155,14 +155,16 @@ __global__ void hk_s2_occ1_stream(const g_t g){
     ducks::art::clobber<Kc_r>(); ducks::art::clobber<Sc_r>();
     Q0_art q0; Q1_art q1; Q2_art q2; Q3_art q3; Q4_art q4; Q5_art q5; Q6_art q6; Q7_art q7;
     // art global load: dst art [QB,DC], per-warp head at depth=warpid, D-chunk c at col. (axis=3 = col-chunk)
-    load<3>(q0, g.Qg, coord<>{0,warpid,0,0}, coord<>{0,0,0,0});
-    load<3>(q1, g.Qg, coord<>{0,warpid,0,1}, coord<>{0,0,0,0});
-    load<3>(q2, g.Qg, coord<>{0,warpid,0,2}, coord<>{0,0,0,0});
-    load<3>(q3, g.Qg, coord<>{0,warpid,0,3}, coord<>{0,0,0,0});
-    load<3>(q4, g.Qg, coord<>{0,warpid,0,4}, coord<>{0,0,0,0});
-    load<3>(q5, g.Qg, coord<>{0,warpid,0,5}, coord<>{0,0,0,0});
-    load<3>(q6, g.Qg, coord<>{0,warpid,0,6}, coord<>{0,0,0,0});
-    load<3>(q7, g.Qg, coord<>{0,warpid,0,7}, coord<>{0,0,0,0});
+    // warpid must be UNIFORM or the buffer resource descriptor lands in VGPRs -> "invalid operand".
+    const int uw = __builtin_amdgcn_readfirstlane(warpid);
+    load<3>(q0, g.Qg, coord<>{0,uw,0,0}, coord<>{0,0,0,0});
+    load<3>(q1, g.Qg, coord<>{0,uw,0,1}, coord<>{0,0,0,0});
+    load<3>(q2, g.Qg, coord<>{0,uw,0,2}, coord<>{0,0,0,0});
+    load<3>(q3, g.Qg, coord<>{0,uw,0,3}, coord<>{0,0,0,0});
+    load<3>(q4, g.Qg, coord<>{0,uw,0,4}, coord<>{0,0,0,0});
+    load<3>(q5, g.Qg, coord<>{0,uw,0,5}, coord<>{0,0,0,0});
+    load<3>(q6, g.Qg, coord<>{0,uw,0,6}, coord<>{0,0,0,0});
+    load<3>(q7, g.Qg, coord<>{0,uw,0,7}, coord<>{0,0,0,0});
     __builtin_amdgcn_s_waitcnt(0);
     OT acc;
     zero(acc);

@@ -161,3 +161,18 @@ Per-warp Q[16,512]=16KB x4 = 64KB on top of ks (st_32x32<64,512>x2 = 128KB) -> L
 checked; likely need sequential per-warp prologue staging (barriers) or a smaller stage. Also note:
 Q-in-VGPR-art is NOT a fallback -- clobbered Q(64)+K(32) whole-function + acc(128) + PV tiles spills.
 So AGPR for Q is REQUIRED, and the ds_read-into-AGPR staging is the true next step.
+
+## CORRECTION — direct HBM->AGPR WORKS (no LDS needed for Q)
+
+probe_hbm_agpr.cpp: macros::buffer_load_dwordx4<256> (dest a[0:3]) assembles clean on gfx950. The
+earlier "invalid operand" was NOT the AGPR dest -- the emitted `buffer_load_dwordx4 a[0:3], v1,
+v[2:5], s15` had the buffer RESOURCE in v[2:5] (VGPRs); a buffer_load needs its resource in SGPRs,
+invalid for ANY dest. Root cause: warpid (from threadIdx, VGPR) in the art load<3> idx coord made
+src_ptr/resource divergent. FIX: const int uw = __builtin_amdgcn_readfirstlane(warpid); use uw in the
+coord. After fix the asm_mode kernel COMPILES + RUNS (no fault) with Q in AGPR: VGPRs 216, AGPRs 128,
+occ 1, 0 spill. So NO LDS staging needed -- direct HBM->AGPR.
+
+REMAINING (correctness): numerics wrong (garbage/NaN) -> the art load<axis=3> coord/unit_coord mapping
+for Q differs from the normal load(coord{0,warpid,0,c}); Q data loaded from wrong addresses. Next:
+fix the art global-load axis/coord (compare unit_coord<axis,3> semantics; bwd uses load<1>(V,{uniform},
+{0,j,0,0}) -- uniform dims in idx, tile-varying in warp_idx). Then re-verify O/LSE.
