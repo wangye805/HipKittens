@@ -21,7 +21,7 @@ typedef uint32_t u2 __attribute__((ext_vector_type(2)));
 constexpr int DP=64;   // K/Q inner dim (2 mma k-steps)
 
 using S_r=ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<64,79>>,4>;   // fp32 rt_16x16, 4 tiles
-using K_r=ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<80,111>>,4>;  // bf16 rt_16x32, 8 tiles (K[64,64])
+using K_r=ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<320,351>>,4>;  // K in AGPR a[64:95]
 using Qfull_r=ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<256,319>>,4>; // whole Q[16,512] -> AGPR (16 tiles)
 using Q3_r=ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<QLO,QLO+7>>,4>;
 using S_art=art<float,64,16,col_l,rt_16x16_s,S_r>;
@@ -29,15 +29,18 @@ using K_art=art<bf16, 64,DP,row_l,rt_16x32_s,K_r>;
 using Qfull_art=art<bf16, 16,512,row_l,rt_16x32_s,Qfull_r>;
 using Q3_art=art<bf16, 16,DP,row_l,rt_16x32_s,Q3_r>;
 
+template<int GPR> __device__ __forceinline__ void v_accvgpr_write(uint32_t val){
+    asm volatile("v_accvgpr_write_b32 a[%0], %1" :: "n"(GPR-256), "v"(val));
+}
 using KcT = rt<bf16, 64, DP, row_l, rt_16x32_s>;   // normal rt K (like the kernel)
 __device__ static inline void art_k_from_rt(const KcT& src, K_art&){
     using KR = K_art::register_ranges; constexpr int W = KcT::width;
     [&]<std::size_t... Ts>(std::index_sequence<Ts...>){ ([&]<std::size_t T>(){
         constexpr int lo = ducks::art::get_nth_range_t<KR,T>::lo; constexpr int n=T/W, m=T%W;
-        macros::v_mov_b32_up2p<lo+0>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[0]));
-        macros::v_mov_b32_up2p<lo+1>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[1]));
-        macros::v_mov_b32_up2p<lo+2>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[2]));
-        macros::v_mov_b32_up2p<lo+3>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[3]));
+        v_accvgpr_write<lo+0>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[0]));
+        v_accvgpr_write<lo+1>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[1]));
+        v_accvgpr_write<lo+2>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[2]));
+        v_accvgpr_write<lo+3>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[3]));
     }.template operator()<Ts>(),...); }(std::make_index_sequence<KcT::height*KcT::width>{});
 }
 template<typename ART> __device__ float art_col_sum(const ART&){

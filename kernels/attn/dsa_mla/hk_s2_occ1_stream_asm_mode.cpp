@@ -68,10 +68,15 @@ using PopT= rt<bf16,  TILE_K, QB, col_l, rt_32x16_s>;
 // Register map:  Q 8 chunks -> AGPR a[0:63] (range 256..319);  K chunk -> VGPR v[64:95];  s -> v[96:111].
 static_assert(TILE_K==64 && DC==64 && QB==16 && D==512, "asm mode fixed to TILE_K=64,DC=64,QB=16,D=512");
 typedef uint32_t u2v __attribute__((ext_vector_type(2)));
-// Q lives as ONE full-width [QB,D] art tile in AGPR a[0:63] (16 k-tiles). K chunk -> v[64:95], s -> v[96:111].
-using Qf_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<256,319>>,4>;  // Q[16,512] whole (16 tiles)
-using Kc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<184,215>>,4>;   // K[64,64] high VGPR (disjoint from acc)
-using Sc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<216,231>>,4>;  // s[64,16] high VGPR
+template<int GPR> __device__ __forceinline__ void v_accvgpr_write(uint32_t val){
+    asm volatile("v_accvgpr_write_b32 a[%0], %1" :: "n"(GPR-256), "v"(val));
+}
+// ALL art tiles live in AGPR (Q, K, s) so they CANNOT overlap the normal-rt acc/PV in VGPR. clobber is
+// only a POINT-clobber, so VGPR art would race with the long-lived acc -> nondeterministic corruption.
+// Different register files = physically disjoint. a[0:63]=Q, a[64:95]=K, a[96:111]=s. AGPR total = 112.
+using Qf_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<256,319>>,4>;  // Q[16,512] a[0:63]
+using Kc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<320,351>>,4>;  // K[64,64] a[64:95]
+using Sc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<352,367>>,4>;  // s[64,16] a[96:111]
 using Qf_art = art<bf16,  QB, D,  row_l, rt_16x32_s, Qf_r>;
 using Kc_art = art<bf16,  TILE_K, DC, row_l, rt_16x32_s, Kc_r>;
 using Sc_art = art<float, TILE_K, QB, col_l, rt_16x16_s, Sc_r>;
@@ -84,7 +89,9 @@ __device__ static inline void qk_chunk(Sc_art&, const Kc_art&){
         { using rA=ducks::art::get_nth_range_t<Kc_art::register_ranges, N*2+0>;
           using rB=ducks::art::get_nth_range_t<Qf_art::register_ranges, 2*c+0>;
           using rCD=ducks::art::get_nth_range_t<Sc_art::register_ranges, N>;
-          mma_ABt_base<typename Sc_art::shape, bf16, rA, rB, rCD, rCD>(); }
+          // chunk 0, first k-step per output tile: zero-accum (initializes s in AGPR, no zero() needed)
+          if constexpr (c==0) mma_ABt_base_zero_accum<typename Sc_art::shape, bf16, rA, rB, rCD>();
+          else                mma_ABt_base<typename Sc_art::shape, bf16, rA, rB, rCD, rCD>(); }
         { using rA=ducks::art::get_nth_range_t<Kc_art::register_ranges, N*2+1>;
           using rB=ducks::art::get_nth_range_t<Qf_art::register_ranges, 2*c+1>;
           using rCD=ducks::art::get_nth_range_t<Sc_art::register_ranges, N>;
@@ -111,10 +118,10 @@ __device__ static inline void art_k_from_rt(const KcT& src, Kc_art&){
     [&]<std::size_t... Ts>(std::index_sequence<Ts...>){ ([&]<std::size_t T>(){
         constexpr int lo = ducks::art::get_nth_range_t<KR,T>::lo;
         constexpr int n = T / W, m = T % W;
-        macros::v_mov_b32_up2p<lo+0>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[0]));
-        macros::v_mov_b32_up2p<lo+1>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[1]));
-        macros::v_mov_b32_up2p<lo+2>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[2]));
-        macros::v_mov_b32_up2p<lo+3>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[3]));
+        v_accvgpr_write<lo+0>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[0]));
+        v_accvgpr_write<lo+1>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[1]));
+        v_accvgpr_write<lo+2>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[2]));
+        v_accvgpr_write<lo+3>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[3]));
     }.template operator()<Ts>(),...); }(std::make_index_sequence<KcT::height*KcT::width>{});
 }
 // ===========================================================================
@@ -215,8 +222,7 @@ __global__ void hk_s2_occ1_stream(const g_t g){
         SB();                           // fill_mask/__syncthreads here anymore -> nothing drains the gather.
 #endif
 
-        // ---- QK in assembly-mode art: Q in AGPR, K streamed into VGPR art, s art ----
-        zero(sart);
+        // ---- QK in assembly-mode art: Q,K,s all in AGPR (disjoint from VGPR acc). s init via zero-accum. ----
         SB();
         // HOIST tile-j topk read: issue now (16 ints via 4 ds_read_b128), keep in lgkmcnt slack through the
         // mma loop so its ~160cyc latency hides under QK; consumed at the mask below with NO exposed wait.

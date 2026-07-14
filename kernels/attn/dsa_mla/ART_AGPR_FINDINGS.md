@@ -245,3 +245,19 @@ exposes it. REAL FIX NEEDED: guarantee acc AND all normal-rt PV tiles are fully 
 K/s ranges for their entire lifetimes -- clobber_gpr (point-clobber) does not do this. Options: make
 acc/PV tiles art too (explicit ranges), or reserve the art range via a mechanism the allocator honors
 whole-function, or shrink footprint so the allocator can't overlap. NOT done. Perf is moot until correct.
+
+## FIX — AGPR isolation makes it DETERMINISTIC (nondeterminism gone)
+
+Root cause of the nondeterminism: clobber_gpr is a POINT-clobber (asm volatile("":::"vN")), NOT a
+whole-function reservation, so the normal-rt acc/PV tiles (VGPR) reused the art K/s VGPRs -> race.
+FIX: put ALL art tiles (Q, K, s) in the AGPR file, acc/PV in VGPR -> different register files =
+physically disjoint, overlap impossible. Q a[0:63], K a[64:95], s a[96:111] (AGPR total 112);
+VGPR=216, occ=1, 0 spill. Needed: (1) v_accvgpr_write inline asm to bridge normal-rt K -> AGPR
+(up2p is VGPR-only); (2) can't zero(sart) in AGPR ("Invalid operand: zero") -> use
+mma_ABt_base_zero_accum for chunk-0's first k-step per output tile to initialize s. RESULT:
+DETERMINISTIC across runs now (O worst ~0.0003 stable, LSE 0.0169 stable). No more nondeterministic NaN.
+
+REMAINING: deterministic LSE bias +0.0165 on every head (kernel LSE consistently HIGHER than ref).
+denom~254 over 256 keys -> softmax denom ~1.66% too large, UNIFORMLY (O ratio ~unaffected, LSE
+log-absolute shows it). Systematic, not corruption. Next: compare art-QK s directly to ref K.Q^T to
+localize (chunked mma_ABt_base order? exp2? a uniform per-key inflation). Baseline LSE was 0.0007.

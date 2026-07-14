@@ -50,6 +50,7 @@ int main(int argc,char**argv){
         float l=0; for(int kk=0;kk<NKK;kk++){s[kk]=(s[kk]<=-1e29f)?0.f:std::exp(s[kk]-m); l+=s[kk];}
         float denom=has_sink?l+std::exp(sink[h]-m):l; float lse_ref=m+std::log(denom);
         if(!(Lo[h]==Lo[h])) lsenan++;
+        if(h<6) printf("  h%d: kernel_lse=%.5f ref_lse=%.5f  signed_err=%+.5f  (m=%.4f log_denom=%.4f)\n", h, Lo[h], lse_ref, Lo[h]-lse_ref, m, std::log(denom));
         float le=std::fabs(lse_ref-Lo[h]); if(le>lworst)lworst=le;
         for(int v=0;v<D;v++){float a=0; for(int kk=0;kk<NKK;kk++){int kr=topk[kk]; if(kr<0)continue; a+=bf(s[kk])*bf(KV[kr*D+v]);}
             float o=a/denom,hk=b2f(Ob[h*D+v]); if(!(hk==hk)){nanc++; nan_per_head[h]++; if(h==0&&first_nan_v0<0)first_nan_v0=v; if(h==0)first_nan_v1=v; continue;}
