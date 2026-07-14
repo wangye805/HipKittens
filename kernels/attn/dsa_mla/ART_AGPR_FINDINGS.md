@@ -140,3 +140,24 @@ INTEGRATION PLAN (piece 4 -> kernel): in hk_s2_occ1_stream, replace the QK mma w
 K/S art) + art_to_rt(s -> s_n) right after; everything downstream (col_max/softmax/copy/p16_to_p32/PV)
 stays as the current normal-rt code. Register win = Q parked in AGPR during QK relieves the ~296 VGPR
 peak (the accvgpr-ferry source). Then verify O/LSE end-to-end + measure steady tile vs 6104/Leon 5396.
+
+## Integration START — hk_s2_occ1_stream_asm_mode.cpp (WIP) + two AGPR-routing blockers
+
+Created a SEPARATE asm-mode kernel (working hk_s2_occ1_stream.cpp kept intact). Wired: s-art, the
+art_s_to_rt bridge, art_k_from_rt (normal-rt K -> art K via up2p), the art QK mma loop, and the normal-rt
+softmax+PV downstream reused verbatim. Register map: Q AGPR a[0:63], K v[64:95], s v[96:111], acc VGPR.
+
+TWO blockers, both = "how does an operand REACH AGPR/art":
+1. K art shared-load: only ST st_16x16/st_16x32 -> rt_16x32 supported; gather LDS `ks` is st_32x32
+   (gather DMA + V ds_read_b64_tr). Worked around with art_k_from_rt (up2p copy from normal rt).
+2. Q into AGPR: direct global buffer_load into AGPR is REJECTED on gfx950 ("invalid operand",
+   buffer_load_dwordx4 a[..], macros.cuh:473) -- buffer_load targets VGPR only. up2p is v_mov (VGPR
+   only) and there is NO v_accvgpr_write macro in this HK. The ONLY route into AGPR is the ds_read
+   shared art-load (ds_read CAN write AGPR) -- which is exactly how the bwd does Q (global->shared
+   G::load, then shared->AGPR ds_read art-load).
+
+CONSEQUENCE: to park Q in AGPR we must stage Q in an st_16x32 LDS per warp and ds_read into AGPR.
+Per-warp Q[16,512]=16KB x4 = 64KB on top of ks (st_32x32<64,512>x2 = 128KB) -> LDS budget must be
+checked; likely need sequential per-warp prologue staging (barriers) or a smaller stage. Also note:
+Q-in-VGPR-art is NOT a fallback -- clobbered Q(64)+K(32) whole-function + acc(128) + PV tiles spills.
+So AGPR for Q is REQUIRED, and the ds_read-into-AGPR staging is the true next step.
