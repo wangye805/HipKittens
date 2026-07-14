@@ -120,3 +120,23 @@ P bf16 art from copy(s->bf16), acc art) + full non-overlapping register map -> i
   over 8 DC-chunks accumulating acc[512,16], (c) online rescale acc *= alpha (mul_col, exists).
   Then full non-overlapping register map + integrate into hk_s2_occ1_stream + verify O/LSE + steady tile.
 - probe_art_pv.cpp = design record (isolates the mma shape check; load-blocked by the above).
+
+## Piece 4 IMPLEMENTED — key realization: art only for QK; PV stays normal-rt
+
+The PV mma does NOT need art. Art (assembly-mode) is only needed to park Q in AGPR during QK.
+After softmax, BRIDGE art s(fp32 rt_16x16) -> normal rt via p2up element-wise (art_to_rt), then reuse
+the EXISTING proven normal-rt PV path unchanged: copy(pb,s_n) -> p16_to_p32(pop,pb) -> mma_AtB(acc,V,pop).
+This avoids art mma_AtB entirely (which needs P as rt_32x16, unbuildable via art load).
+
+probe_art_pv2.cpp validates:
+- BRIDGE_ONLY build: QK-art (Q->AGPR) + art_to_rt bridge -> runs clean (bridge sound).
+- art_to_rt: read art regs via v_mov_b32_p2up, bit-copy (reinterpret_cast<uint32_t*>) into normal
+  rt .data[] (element type not float-assignable -> must bit-copy, like p16_to_p32 does).
+- V-load caveat: loading V from a STANDALONE st_32x32 [64,64] faults in the probe harness (isolated
+  setup artifact); in the kernel V loads from the wide KS [64,512] subtile = proven working code, so
+  integration is unaffected. NOMMA+NOLOAD build confirms fault is only that standalone load.
+
+INTEGRATION PLAN (piece 4 -> kernel): in hk_s2_occ1_stream, replace the QK mma with art-QK (Q in AGPR,
+K/S art) + art_to_rt(s -> s_n) right after; everything downstream (col_max/softmax/copy/p16_to_p32/PV)
+stays as the current normal-rt code. Register win = Q parked in AGPR during QK relieves the ~296 VGPR
+peak (the accvgpr-ferry source). Then verify O/LSE end-to-end + measure steady tile vs 6104/Leon 5396.
