@@ -29,6 +29,17 @@ using K_art=art<bf16, 64,DP,row_l,rt_16x32_s,K_r>;
 using Qfull_art=art<bf16, 16,512,row_l,rt_16x32_s,Qfull_r>;
 using Q3_art=art<bf16, 16,DP,row_l,rt_16x32_s,Q3_r>;
 
+using KcT = rt<bf16, 64, DP, row_l, rt_16x32_s>;   // normal rt K (like the kernel)
+__device__ static inline void art_k_from_rt(const KcT& src, K_art&){
+    using KR = K_art::register_ranges; constexpr int W = KcT::width;
+    [&]<std::size_t... Ts>(std::index_sequence<Ts...>){ ([&]<std::size_t T>(){
+        constexpr int lo = ducks::art::get_nth_range_t<KR,T>::lo; constexpr int n=T/W, m=T%W;
+        macros::v_mov_b32_up2p<lo+0>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[0]));
+        macros::v_mov_b32_up2p<lo+1>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[1]));
+        macros::v_mov_b32_up2p<lo+2>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[2]));
+        macros::v_mov_b32_up2p<lo+3>(*reinterpret_cast<const uint32_t*>(&src.tiles[n][m].data[3]));
+    }.template operator()<Ts>(),...); }(std::make_index_sequence<KcT::height*KcT::width>{});
+}
 template<typename ART> __device__ float art_col_sum(const ART&){
     using RR=typename ART::register_ranges; float acc=0.f;
     [&]<std::size_t... Rs>(std::index_sequence<Rs...>){ ([&]<std::size_t R>(){
@@ -43,16 +54,35 @@ template<typename ART> __device__ float art_col_sum(const ART&){
 
 __global__ void probe(gl<bf16,-1,-1,-1,-1> gK, gl<bf16,-1,-1,-1,-1> gQ, gl<float,-1,-1,-1,-1> gO){
     extern __shared__ int __shm[]; shared_allocator al((int*)&__shm[0]);
-    st_bf<64,DP,st_16x32_s> &Ks=al.allocate<st_bf<64,DP,st_16x32_s>>();
+    st_bf<64,DP,st_32x32_s> &Ks=al.allocate<st_bf<64,DP,st_32x32_s>>();
     load(Ks,gK,coord<>{0,0,0,0}); __builtin_amdgcn_s_waitcnt(0); __syncthreads();
     ducks::art::clobber<S_r>(); ducks::art::clobber<K_r>(); ducks::art::clobber<Qfull_r>();
     S_art s; K_art k; Qfull_art qfull; Q3_art q;  // q aliases chunk-3 sub-range of qfull
-    // K from shared (proven path)
+#ifdef KBRIDGE
+    // K via normal-rt load + art_k_from_rt bridge (the kernel's path under test)
+    { KcT kc; auto x=subtile_inplace<64,DP>(Ks,{0,0}); load(kc, x); asm volatile("s_waitcnt lgkmcnt(0)"); art_k_from_rt(kc, k); }
+#else
+    // K from shared art-load (proven path)
     { auto x=subtile_inplace<64,DP>(Ks,{0,0}); uint32_t a=get_address(k,x); load<0,0>(k,x,a); load<0,1>(k,x,a); load<1,0>(k,x,a); load<1,1>(k,x,a); load<2,0>(k,x,a); load<2,1>(k,x,a); load<3,0>(k,x,a); load<3,1>(k,x,a); }
-    // Q from GLOBAL into AGPR: load WHOLE [16,512] once (full width, like bwd); q is a chunk-3 view.
+#endif
+    // Q from GLOBAL into AGPR: load WHOLE [16,512] once (full width, like bwd).
     load(qfull, gQ, coord<>{0,WW,0,0}, coord<>{0,0,0,0});
     __builtin_amdgcn_s_waitcnt(0);
-    zero(s); mma_ABt(s,k,q,s);
+    // Custom chunked QK: s += K_chunk . Qfull[:, chunk c]^T via mma_ABt_base with INDEPENDENT A/B ranges.
+    // K_art [64,64]=8 tiles (h4xw2): tile (N,klocal)=N*2+klocal. Qfull [16,512]=16 tiles (h1xw16): global
+    // k-tile = 2*c+klocal (M=0). s [64,16]=4 tiles (h4xw1): tile N. c = chunk index (CC).
+    zero(s);
+    constexpr int c = CC;
+    [&]<std::size_t... Ns>(std::index_sequence<Ns...>){ ([&]<std::size_t N>(){
+        { using rA=ducks::art::get_nth_range_t<K_art::register_ranges, N*2+0>;
+          using rB=ducks::art::get_nth_range_t<Qfull_art::register_ranges, 2*c+0>;
+          using rCD=ducks::art::get_nth_range_t<S_art::register_ranges, N>;
+          mma_ABt_base<typename S_art::shape, bf16, rA, rB, rCD, rCD>(); }
+        { using rA=ducks::art::get_nth_range_t<K_art::register_ranges, N*2+1>;
+          using rB=ducks::art::get_nth_range_t<Qfull_art::register_ranges, 2*c+1>;
+          using rCD=ducks::art::get_nth_range_t<S_art::register_ranges, N>;
+          mma_ABt_base<typename S_art::shape, bf16, rA, rB, rCD, rCD>(); }
+    }.template operator()<Ns>(),...); }(std::make_index_sequence<4>{});
     ((float*)&gO[coord<>{0,0,0,0}])[threadIdx.x] = art_col_sum(s);  // sum over keys per query? col_sum over rows(keys) -> per query q=L%16
 }
 int main(){

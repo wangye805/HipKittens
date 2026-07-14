@@ -194,3 +194,20 @@ Verified with an isolated probe (K from shared, Q from global into AGPR, mma_ABt
    view objects) -- i.e. mma_ABt<N,M,Kstep>(s, K_c, qfull) selecting qfull's k-slice per K chunk.
    Need to confirm the art mma_ABt<N,M,K> sub-tile indexing semantics. This is the remaining unlock
    for Q-in-AGPR; everything else (HBM->AGPR, s-art, bridge, PV, K bridge) is proven.
+
+## BREAKTHROUGH — chunked QK vs full-Q-in-AGPR works; art-QK pipeline numerically correct
+
+probe_qglobal: load Q as ONE full-width [16,512] art tile (AGPR), then drive chunked QK via
+mma_ABt_base<D::shape,bf16,rA,rB,rC,rD>() with INDEPENDENT A/B ranges: rA=Kchunk.ranges[N*2+klocal],
+rB=Qfull.ranges[2*c+klocal] (M=0), rC=rD=s.ranges[N]. PASS for all (warp,chunk). Also art_k_from_rt
+(normal-rt K -> art via up2p) PASS from both st_16x32 AND st_32x32.
+
+Applied to hk_s2_occ1_stream_asm_mode.cpp (qk_chunk<c> helper + one full-Q load). CRITICAL BUILD FLAG:
+-mllvm -amdgpu-mfma-vgpr-form (forces mma acc->VGPR). Without it acc lands in AGPR (128) colliding/
+pressuring; with it AGPR=64 (just Q), VGPR=216, occ=1, 0 spill.
+RESULT: O numerically CORRECT where computed (seed1 worst 0.00999, >.02=0) and LSE correct for ALL
+heads (0.0167) -> QK+softmax right for all 4 warps. REMAINING BUG: nan in O for 48/64 heads = 3 of 4
+warps (only 1 warp's O correct). Since LSE is right for all warps, QK/Q-load/K-bridge/s-bridge all
+work; the NaN is isolated to the PV/acc/O path for 3 warps (warp-dependent, though code is
+warp-uniform -> suspect register-allocation/clobber interaction or acc region). Next: dump NaN head
+range; check acc zero/rescale/transpose per warp.

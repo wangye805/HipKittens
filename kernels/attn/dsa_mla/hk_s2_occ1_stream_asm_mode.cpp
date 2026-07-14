@@ -68,14 +68,29 @@ using PopT= rt<bf16,  TILE_K, QB, col_l, rt_32x16_s>;
 // Register map:  Q 8 chunks -> AGPR a[0:63] (range 256..319);  K chunk -> VGPR v[64:95];  s -> v[96:111].
 static_assert(TILE_K==64 && DC==64 && QB==16 && D==512, "asm mode fixed to TILE_K=64,DC=64,QB=16,D=512");
 typedef uint32_t u2v __attribute__((ext_vector_type(2)));
-#define DEFQ(c) \
-  using Q##c##_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<256+8*(c), 263+8*(c)>>,4>; \
-  using Q##c##_art = art<bf16, QB, DC, row_l, rt_16x32_s, Q##c##_r>;
-DEFQ(0) DEFQ(1) DEFQ(2) DEFQ(3) DEFQ(4) DEFQ(5) DEFQ(6) DEFQ(7)
-using Kc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<64,95>>,4>;   // [64,64] rt_16x32 = 8 tiles
-using Sc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<96,111>>,4>;  // [64,16] rt_16x16 = 4 tiles
+// Q lives as ONE full-width [QB,D] art tile in AGPR a[0:63] (16 k-tiles). K chunk -> v[64:95], s -> v[96:111].
+using Qf_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<256,319>>,4>;  // Q[16,512] whole (16 tiles)
+using Kc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<64,95>>,4>;    // K[64,64] rt_16x32 = 8 tiles
+using Sc_r = ducks::art::split_many_t<ducks::art::type_list<ducks::art::range<96,111>>,4>;   // s[64,16] rt_16x16 = 4 tiles
+using Qf_art = art<bf16,  QB, D,  row_l, rt_16x32_s, Qf_r>;
 using Kc_art = art<bf16,  TILE_K, DC, row_l, rt_16x32_s, Kc_r>;
 using Sc_art = art<float, TILE_K, QB, col_l, rt_16x16_s, Sc_r>;
+
+// chunked QK: s += K_chunk . Qfull[:, chunk c]^T. mma_ABt_base with INDEPENDENT A/B ranges so the
+// streamed K chunk (width 2 = 2 k-tiles) aligns to Qfull's global k-tiles [2c, 2c+1] (M=0).
+template<int c>
+__device__ static inline void qk_chunk(Sc_art&, const Kc_art&){
+    [&]<std::size_t... Ns>(std::index_sequence<Ns...>){ ([&]<std::size_t N>(){
+        { using rA=ducks::art::get_nth_range_t<Kc_art::register_ranges, N*2+0>;
+          using rB=ducks::art::get_nth_range_t<Qf_art::register_ranges, 2*c+0>;
+          using rCD=ducks::art::get_nth_range_t<Sc_art::register_ranges, N>;
+          mma_ABt_base<typename Sc_art::shape, bf16, rA, rB, rCD, rCD>(); }
+        { using rA=ducks::art::get_nth_range_t<Kc_art::register_ranges, N*2+1>;
+          using rB=ducks::art::get_nth_range_t<Qf_art::register_ranges, 2*c+1>;
+          using rCD=ducks::art::get_nth_range_t<Sc_art::register_ranges, N>;
+          mma_ABt_base<typename Sc_art::shape, bf16, rA, rB, rCD, rCD>(); }
+    }.template operator()<Ns>(),...); }(std::make_index_sequence<TILE_K/16>{});
+}
 
 // bridge art s (fp32 rt_16x16, col_l) -> normal rt ST_ (same logical layout), element-wise via p2up.
 __device__ static inline void art_s_to_rt(const Sc_art&, ST_& d){
@@ -149,22 +164,12 @@ __global__ void hk_s2_occ1_stream(const g_t g){
     const int tok = blockIdx.x;
     const int nt = g.n_tiles;
 
-    // Q parked in AGPR (art), loaded once from global — invariant across tiles. K/s art too (QK mma).
-    ducks::art::clobber<Q0_r>(); ducks::art::clobber<Q1_r>(); ducks::art::clobber<Q2_r>(); ducks::art::clobber<Q3_r>();
-    ducks::art::clobber<Q4_r>(); ducks::art::clobber<Q5_r>(); ducks::art::clobber<Q6_r>(); ducks::art::clobber<Q7_r>();
-    ducks::art::clobber<Kc_r>(); ducks::art::clobber<Sc_r>();
-    Q0_art q0; Q1_art q1; Q2_art q2; Q3_art q3; Q4_art q4; Q5_art q5; Q6_art q6; Q7_art q7;
-    // art global load: dst art [QB,DC], per-warp head at depth=warpid, D-chunk c at col. (axis=3 = col-chunk)
-    // warpid must be UNIFORM or the buffer resource descriptor lands in VGPRs -> "invalid operand".
+    // Q parked in AGPR (art): ONE full-width [QB,D] load from global (warpid must be UNIFORM or the
+    // buffer resource lands in VGPRs -> invalid). K/s art clobbered for the QK mma.
+    ducks::art::clobber<Qf_r>(); ducks::art::clobber<Kc_r>(); ducks::art::clobber<Sc_r>();
+    Qf_art qfull;
     const int uw = __builtin_amdgcn_readfirstlane(warpid);
-    load<3>(q0, g.Qg, coord<>{0,uw,0,0}, coord<>{0,0,0,0});
-    load<3>(q1, g.Qg, coord<>{0,uw,0,1}, coord<>{0,0,0,0});
-    load<3>(q2, g.Qg, coord<>{0,uw,0,2}, coord<>{0,0,0,0});
-    load<3>(q3, g.Qg, coord<>{0,uw,0,3}, coord<>{0,0,0,0});
-    load<3>(q4, g.Qg, coord<>{0,uw,0,4}, coord<>{0,0,0,0});
-    load<3>(q5, g.Qg, coord<>{0,uw,0,5}, coord<>{0,0,0,0});
-    load<3>(q6, g.Qg, coord<>{0,uw,0,6}, coord<>{0,0,0,0});
-    load<3>(q7, g.Qg, coord<>{0,uw,0,7}, coord<>{0,0,0,0});
+    load(qfull, g.Qg, coord<>{0,uw,0,0}, coord<>{0,0,0,0});
     __builtin_amdgcn_s_waitcnt(0);
     OT acc;
     zero(acc);
@@ -224,16 +229,16 @@ __global__ void hk_s2_occ1_stream(const g_t g){
           for (int m = 0; m < 16; m++) tkv[m] = tk[4*grp + (m & 3) + 16*(m >> 2)];
         }
         SB();
-        // stream K chunk c: load into a NORMAL rt (st_32x32 native), bridge to art K (option a), mma.
+        // stream K chunk c: load into a NORMAL rt (st_32x32 native), bridge to art K, chunked mma vs Qfull.
         Kc_art k_art;
-        #define QKC(c, qq) { \
+        #define QKC(c) { \
             KcT k_c; \
             typename KS::template subtile<TILE_K, DC> ksub(ks[cur], {0, (c)}); \
             load(k_c, ksub); \
             asm volatile("s_waitcnt lgkmcnt(0)"); SB(); \
             art_k_from_rt(k_c, k_art); SB(); \
-            mma_ABt(sart, k_art, qq, sart); SB(); }
-        QKC(0,q0) QKC(1,q1) QKC(2,q2) QKC(3,q3) QKC(4,q4) QKC(5,q5) QKC(6,q6) QKC(7,q7)
+            qk_chunk<(c)>(sart, k_art); SB(); }
+        QKC(0) QKC(1) QKC(2) QKC(3) QKC(4) QKC(5) QKC(6) QKC(7)
         #undef QKC
         // bridge art s (fp32) -> normal rt; downstream softmax + PV are the proven normal-rt path.
         ST_ s;
