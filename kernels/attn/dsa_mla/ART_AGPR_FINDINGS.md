@@ -97,3 +97,11 @@ probe_art_qk had this bug, invisible to ISA-only). Reinforces: assembly-mode nee
 
 Pieces done: 1 (QK-art Q->AGPR, ferry-free) + 2 (art col_max/col_sum). Next: 3 softmax in art
 (exp2/sub_col/mul_col/add_row exist), 4 PV in art + full register map, then integrate into hk_s2_occ1_stream.
+
+## UPDATE — Piece 3 PASS (softmax core in art)
+
+probe_art_softmax: QK-art -> m=art_col_max(s) -> denom = sum exp2(scale*(s-m)) -> vs CPU = worst 0.0000.
+Validates scale + sub(m) + exp2 + col_sum fused over the art s regs (per-lane m from col_max; the
+sub is a per-lane scalar since a lane holds one query's keys). All done via v_mov_b32_p2up reads +
+permlane butterfly. Pieces 1,2,3 all numerically validated. Next: piece 4 PV-in-art (mma_AtB with
+P bf16 art from copy(s->bf16), acc art) + full non-overlapping register map -> integrate into kernel.
