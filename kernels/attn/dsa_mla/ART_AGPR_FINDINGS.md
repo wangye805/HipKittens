@@ -230,3 +230,18 @@ REMAINING (minor): LSE worst ~0.017 (vs original 0.0007), just over the strict t
 O is correct to 0.0003 so the softmax weights are right; the LSE absolute value differs by ~1.7%,
 a systematic fp-accumulation-order difference from the chunked mma_ABt_base vs the original mma_ABt.
 Not a correctness bug. Next: perf (steady tile vs 6104/Leon 5396) + optionally chase the LSE order.
+
+## CORRECTION — art-QK NOT actually correct: residual NONDETERMINISTIC corruption
+
+Prior "WORKING" claim was WRONG. Baseline (original occ-1, same flags) is deterministic: O 0.00009,
+LSE 0.000709, identical every run. The art-QK kernel is BOTH worse AND nondeterministic run-to-run:
+O 0.0003-0.0011, LSE 0.002-0.017 (grows with NTILES). The "minor fp accumulation order" explanation
+was wrong. This is the SAME class as the NaN bug (register corruption) -- the high-VGPR disjoint-range
+move only PARTIALLY fixed it (killed the gross NaN, left small nondeterministic corruption).
+Nondeterminism (same binary/seed, varying output) = uninitialized/stale register read: a normal-rt
+tile (acc or a PV operand) still partially overlaps the art region (v184:231) and occasionally reads
+stale data (prior-wave leftover) before write. O hides it (normalized ratio); LSE (absolute sum)
+exposes it. REAL FIX NEEDED: guarantee acc AND all normal-rt PV tiles are fully disjoint from the art
+K/s ranges for their entire lifetimes -- clobber_gpr (point-clobber) does not do this. Options: make
+acc/PV tiles art too (explicit ranges), or reserve the art range via a mechanism the allocator honors
+whole-function, or shrink footprint so the allocator can't overlap. NOT done. Perf is moot until correct.
