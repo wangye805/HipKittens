@@ -176,3 +176,21 @@ REMAINING (correctness): numerics wrong (garbage/NaN) -> the art load<axis=3> co
 for Q differs from the normal load(coord{0,warpid,0,c}); Q data loaded from wrong addresses. Next:
 fix the art global-load axis/coord (compare unit_coord<axis,3> semantics; bwd uses load<1>(V,{uniform},
 {0,j,0,0}) -- uniform dims in idx, tile-varying in warp_idx). Then re-verify O/LSE.
+
+## Q global->AGPR load fully characterized (probe_qglobal.cpp)
+
+Verified with an isolated probe (K from shared, Q from global into AGPR, mma_ABt, col-sum vs CPU):
+- Single contiguous [16,64] tile at origin: PASS. Depth/warp offset (coord d field): PASS (W=2,C=0).
+- COL-CHUNK global load (coord.c OR elem_offset = c*64): garbled (no clean slice matches). The art
+  global load is NOT designed for a col-offset base; it expects to load the FULL D-width tile (bwd does
+  art<bf16,rows,D=512> in ONE load, never col-chunks).
+- Full-width [16,512] load + separate chunk-VIEW art objects over sub-ranges: DOES NOT WORK. chunk-0
+  view passes only because it aliases the base; QLO=256/264/272 all give identical results -> the
+  view's register-range lo is IGNORED, the mma reads qfull's base regs. Separate art objects over
+  overlapping physical registers are not reliably aliased by the compiler.
+
+=> CORRECT PATH (next): load Q as ONE full-width [16,512] art tile in AGPR (works), and drive the
+   chunked QK mma over SUB-TILES of that SAME object via mma_ABt tile-index template args (not separate
+   view objects) -- i.e. mma_ABt<N,M,Kstep>(s, K_c, qfull) selecting qfull's k-slice per K chunk.
+   Need to confirm the art mma_ABt<N,M,K> sub-tile indexing semantics. This is the remaining unlock
+   for Q-in-AGPR; everything else (HBM->AGPR, s-art, bridge, PV, K bridge) is proven.
