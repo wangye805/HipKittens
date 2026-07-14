@@ -120,3 +120,24 @@ template<int N_THREADS, typename ST> __device__ constexpr int gather_ndma() {
     constexpr int totalB = ST::rows * ST::cols * (int)sizeof(typename ST::dtype);
     return (totalB + bpt * N_THREADS - 1) / (bpt * N_THREADS);
 }
+
+// ---- topk tile HBM->LDS via raw_buffer_load_lds DMA (async, vmcnt-tracked, NO register hop, NO forced
+// vmcnt(0) drain). topk is a LINEAR int array -> lane-consecutive DMA write lands correctly (no swizzle).
+// TK ints = one warp's worth (gfx950 warp=64 lanes, TK=32 -> lanes 0..TK-1 active). Only warp 0 issues.
+template<int N_THREADS, int TK, int RING>
+__device__ inline void load_topk_tile_dma(int* ring, const kittens::gl<int,-1,-1,-1,-1>& Tkg, int tok, int tile) {
+    using namespace kittens;
+    constexpr int nw = N_THREADS / kittens::WARP_THREADS;
+    const int warpid = kittens::warpid() % nw;
+    if (warpid != 0) return;                                  // TK=32 ints => single warp
+    const int laneid = kittens::laneid();
+    int* dst   = ring + (tile % RING) * TK;                  // LDS destination (linear)
+    int* gbase = (int*)&Tkg[coord<>{tok, 0, tile, 0}];       // HBM base of this tile's TK contiguous ints
+    i32x4 srsrc = make_srsrc(gbase, (uint32_t)(TK * sizeof(int)));
+    uint32_t lds_base = (uint32_t)(reinterpret_cast<uintptr_t>(dst));
+    as3_uint32_ptr lds_ptr = (as3_uint32_ptr)(lds_base);     // M0 base; HW writes LDS[base + lane*bpt]
+    if (laneid < TK) {
+        llvm_amdgcn_raw_buffer_load_lds(srsrc, lds_ptr, (int)sizeof(int),
+                                        (uint32_t)(laneid * sizeof(int)), 0, 0, (int)coherency::cache_all);
+    }
+}

@@ -13,3 +13,13 @@ __device__ inline void load_topk(int* smem, const kittens::gl<int,-1,-1,-1,-1>& 
         smem[i] = Tkg[kittens::coord<>{tok, 0, i / TK, i % TK}];
     }
 }
+
+// load ONE topk tile [tile, 0..TK) into a ring slot (per-tile prefetch). Named (not a macro) so the
+// ISA->source resolver gives it its own frame in the ATT viewer.
+template<int N_THREADS, int TK, int RING>
+__device__ inline void load_topk_tile(int* ring, const kittens::gl<int,-1,-1,-1,-1>& Tkg, int tok, int tile) {
+    int* dst = ring + (tile % RING) * TK;
+    #pragma unroll
+    for (int k = threadIdx.x; k < TK; k += N_THREADS)
+        dst[k] = Tkg[kittens::coord<>{tok, 0, tile, k}];
+}
