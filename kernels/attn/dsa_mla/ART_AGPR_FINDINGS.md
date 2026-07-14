@@ -105,3 +105,18 @@ Validates scale + sub(m) + exp2 + col_sum fused over the art s regs (per-lane m 
 sub is a per-lane scalar since a lane holds one query's keys). All done via v_mov_b32_p2up reads +
 permlane butterfly. Pieces 1,2,3 all numerically validated. Next: piece 4 PV-in-art (mma_AtB with
 P bf16 art from copy(s->bf16), acc art) + full non-overlapping register map -> integrate into kernel.
+
+## Piece 4 design RESOLVED (PV mma_AtB in art)
+
+- art mma_AtB requires ALL operands (D,A,B,C) col_l.
+- PV: acc[DC=64,16q] = V[64key,64DC]^T . P[64key,16q]. A=V rt_16x32 col_l, B=P must be rt_32x16
+  (the mma is 16x16x32 -> K=32 contraction; P rt_16x16 has K=16, rejected). Same P shape the rt
+  kernel uses (pop=rt_32x16).
+- art `load<>` CANNOT produce rt_32x16 from shared ("Unsupported shape" shared_to_register.cuh
+  108/191). So P32 is NOT loaded -> it is built by the in-register permlane reshuffle from s
+  (rt_16x16 bf16) = the REG_RESHUFFLE p16->p32 recipe already in hk_s2_occ1_stream:
+    t = permlane32_swap(tile[2i].d[k], tile[2i+1].d[k]); {d[k],d[k+2]} = permlane16_swap(t.x,t.y)
+- => piece 4 = (a) art in-register reshuffle s(rt_16x16 bf16) -> P32(rt_32x16), (b) mma_AtB(acc,V,P32)
+  over 8 DC-chunks accumulating acc[512,16], (c) online rescale acc *= alpha (mul_col, exists).
+  Then full non-overlapping register map + integrate into hk_s2_occ1_stream + verify O/LSE + steady tile.
+- probe_art_pv.cpp = design record (isolates the mma shape check; load-blocked by the above).
