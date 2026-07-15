@@ -273,3 +273,17 @@ nonlinear exp2-denom and the alpha rescale, accumulating. O (a ratio) stays ~cor
 orig 0.00009, 3x). Next: compare art-QK s to normal-QK s element-wise (not just col-sum) to find the
 per-element difference; likely the chunked mma_ABt_base accumulation order or an AGPR-operand rounding.
 STATUS: deterministic + O correct; LSE small systematic bias (0.003-0.017), not bit-parity with baseline.
+
+## LSE bias ROOT-CAUSED: it's the bridge + HK reductions, NOT the art QK
+
+probe_sdiff: art QK s -> (art_col_max + art_denom = sum exp2(sc*(s-m))) vs CPU = worst |log ratio|
+0.00000 EXACT. So the art QK + softmax MATH is perfect. Also confirmed art s element-0 = CPU exactly
+(Sa[0]=cpu[0][0]). Permlane reduce ruled out (original 0.0007 with/without; art 0.0169 with/without).
+=> the +0.017 LSE bias is introduced DOWNSTREAM by art_s_to_rt (bridge art fp32 s -> normal rt) +
+HK's col_max/col_sum/exp2 on the bridged s -- the path the probe bypasses. O stays ~right (bridge
+mostly correct, 3x worse) but the reduction/exp2 on the bridged s biases the denom, compounding
+cross-tile via l_i=l_i*alpha+col_sum.
+PARITY FIX (proven exact): do the softmax IN ART on the art s (art_col_max + art sub/exp2 + art_col_sum),
+i.e. don't bridge to normal for the reductions. The art reductions give bit-exact denom. This is the
+softmax-in-art work (pieces 2/3 earlier). Alternatively debug art_s_to_rt layout / HK reduction on
+bridged s. STATUS: deterministic + O correct; LSE parity path identified & proven (art-native softmax).
