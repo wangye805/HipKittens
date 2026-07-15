@@ -26,14 +26,10 @@ using namespace kittens;
 #ifndef TILE_K
 #define TILE_K 32
 #endif
-#ifndef TK_SUB
-#define TK_SUB 32
-#endif
 #ifndef DC
 #define DC 64
 #endif
 constexpr int QB = 16, D = 512;
-constexpr int NSUB = TILE_K / TK_SUB;
 constexpr int NCH  = D / DC;
 constexpr int NB   = TILE_K / 16;
 constexpr float LOG2E = 1.4426950408889634f, LN2 = 0.6931471805599453f;
@@ -47,6 +43,9 @@ constexpr float LOG2E = 1.4426950408889634f, LN2 = 0.6931471805599453f;
 #ifndef HAS_SINK
 #define HAS_SINK 1
 #endif
+#ifndef KV_ROWS
+#define KV_ROWS 4096       // dense KV rows (T_KV); compile-time avoids a per-gather runtime shape read
+#endif
 // base-2 softmax scale = (1/sqrt(D)) * log2(e)   (D=512)
 constexpr float SCALE = 1.4426950408889634f / 22.627416997969522f;
 #ifndef MINWAVES
@@ -56,8 +55,8 @@ constexpr float SCALE = 1.4426950408889634f / 22.627416997969522f;
 #define TK_RING 8   // topk ring: deeper than KV ring (covers prefetch-3 + stagger lag), power-of-2 -> &7
 
 using QcT = rt<bf16,  QB,     DC, row_l, rt_16x32_s>;
-using KcT = rt<bf16,  TK_SUB, DC, row_l, rt_16x32_s>;
-using VcT = rt<bf16,  TK_SUB, DC, col_l, rt_32x16_s>;
+using KcT = rt<bf16,  TILE_K, DC, row_l, rt_16x32_s>;
+using VcT = rt<bf16,  TILE_K, DC, col_l, rt_32x16_s>;
 using ST_ = rt<float, TILE_K, QB, col_l, rt_16x16_s>;
 using PbT = rt<bf16,  TILE_K, QB, col_l, rt_16x16_s>;
 using PopT= rt<bf16,  TILE_K, QB, col_l, rt_32x16_s>;
@@ -92,7 +91,7 @@ struct globals {
     size_t dynamic_shared_memory() { return RING * sizeof(KS); }
 };
 
-#define GATHER_HALF(buf, ti) gather_kv_async<NT>((buf), g.KVg, topk_all + (((ti)%TK_RING))*TILE_K, 0, (int)g.KVg.rows())
+#define GATHER_HALF(buf, ti) gather_kv_async<NT>((buf), g.KVg, topk_all + (((ti)%TK_RING))*TILE_K, 0, KV_ROWS)
 #define SB() __builtin_amdgcn_sched_barrier(0)
 #define BAR() do { __builtin_amdgcn_s_barrier(); SB(); } while(0)
 
@@ -119,7 +118,7 @@ __global__ void dsa_mla_fwd(const globals g){
     }
 
     OT acc;
-    typename ST_::row_vec m_i, l_i, m_new, alpha;
+    typename ST_::row_vec m_i, l_i;
     constexpr int NDMA = gather_ndma<NT, KS>();
 
     // (2/3) drain topk (needed before the gather reads topk from LDS), then barrier for cross-warp vis.
@@ -179,25 +178,21 @@ __global__ void dsa_mla_fwd(const globals g){
         zero(s);
         SB();
         {
-            constexpr int RPC_K = TK_SUB * DC / 512;
+            constexpr int RPC_K = TILE_K * DC / 512;
             constexpr int WKT = (RPC_K + 4) < 15 ? (RPC_K + 4) : 15;
-            constexpr int NI = NSUB * NCH;
             KcT kb0, kb1;                       // DOUBLE BUFFER: prefetch next chunk's ds_read under mma
-            { typename KS::template subtile<TK_SUB, DC> s0(ks[cur], {0, 0}); load(kb0, s0); }
+            { typename KS::template subtile<TILE_K, DC> s0(ks[cur], {0, 0}); load(kb0, s0); }
             #pragma unroll
-            for (int i = 0; i < NI; i++) {
-                const int rb = i / NCH, c = i % NCH;
-                if (i + 1 < NI) {
-                    const int nrb = (i + 1) / NCH, nc = (i + 1) % NCH;
-                    typename KS::template subtile<TK_SUB, DC> sn(ks[cur], {nrb, nc});
-                    load((i & 1) ? kb0 : kb1, sn);
+            for (int c = 0; c < NCH; c++) {     // one DC-channel of the [TILE_K,D] tile per step
+                if (c + 1 < NCH) {
+                    typename KS::template subtile<TILE_K, DC> sn(ks[cur], {0, c + 1});
+                    load((c & 1) ? kb0 : kb1, sn);
                     asm volatile("s_waitcnt lgkmcnt(%0)" :: "i"(WKT));
                 } else {
                     asm volatile("s_waitcnt lgkmcnt(0)");
                 }
                 SB();
-                auto& s_rb = subtile_inplace<TK_SUB>(s, rb);
-                mma_ABt(s_rb, (i & 1) ? kb1 : kb0, q_arr[c], s_rb);
+                mma_ABt(s, (c & 1) ? kb1 : kb0, q_arr[c], s);
                 SB();
             }
         }
@@ -246,26 +241,22 @@ __global__ void dsa_mla_fwd(const globals g){
 
         // ===== Phase D: PV =====
         {
-            constexpr int RPC_V = TK_SUB * DC / 256;
+            constexpr int RPC_V = TILE_K * DC / 256;
             constexpr int WV = RPC_V < 15 ? RPC_V : 15;
-            constexpr int NI = NSUB * NCH;
             VcT vb0, vb1;                       // DOUBLE BUFFER
-            { typename KS::template subtile<TK_SUB, DC> v0(ks[cur], {0, 0}); load(vb0, v0); }
+            { typename KS::template subtile<TILE_K, DC> v0(ks[cur], {0, 0}); load(vb0, v0); }
             #pragma unroll
-            for (int i = 0; i < NI; i++) {
-                const int rb = i / NCH, c = i % NCH;
-                if (i + 1 < NI) {
-                    const int nrb = (i + 1) / NCH, nc = (i + 1) % NCH;
-                    typename KS::template subtile<TK_SUB, DC> vn(ks[cur], {nrb, nc});
-                    load((i & 1) ? vb0 : vb1, vn);
+            for (int c = 0; c < NCH; c++) {
+                if (c + 1 < NCH) {
+                    typename KS::template subtile<TILE_K, DC> vn(ks[cur], {0, c + 1});
+                    load((c & 1) ? vb0 : vb1, vn);
                     asm volatile("s_waitcnt lgkmcnt(%0)" :: "i"(WV));
                 } else {
                     asm volatile("s_waitcnt lgkmcnt(0)");
                 }
                 SB();
-                auto& pop_rb = subtile_inplace<TK_SUB>(pop, rb);
-                auto& acc_c  = subtile_inplace<DC>(acc, c);
-                mma_AtB(acc_c, (i & 1) ? vb1 : vb0, pop_rb, acc_c);
+                auto& acc_c = subtile_inplace<DC>(acc, c);   // real D-channel subtile of acc[D,QB]
+                mma_AtB(acc_c, (c & 1) ? vb1 : vb0, pop, acc_c);
                 SB();
             }
         }
