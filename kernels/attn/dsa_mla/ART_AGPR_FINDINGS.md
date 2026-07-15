@@ -287,3 +287,19 @@ PARITY FIX (proven exact): do the softmax IN ART on the art s (art_col_max + art
 i.e. don't bridge to normal for the reductions. The art reductions give bit-exact denom. This is the
 softmax-in-art work (pieces 2/3 earlier). Alternatively debug art_s_to_rt layout / HK reduction on
 bridged s. STATUS: deterministic + O correct; LSE parity path identified & proven (art-native softmax).
+
+## Parity attempt (art-native softmax) — did NOT close the gap; bias is in the in-kernel s, not reductions
+
+Implemented a separate exact-LSE accumulation in the kernel: manual per-lane col_max + exp2f col_sum
+(the same reductions that were BIT-EXACT in probe_sdiff) on the scaled+masked normal s, output LSE from
+those. RESULT: LSE still ~0.017 (NT=4), and NT=1 went 0.0029(HK) -> 0.0043(manual) = WORSE. So the
+reduction op is NOT the cause. The bias lives in the in-kernel art-QK s VALUES (~0.3%/tile), which BOTH
+HK and manual reductions inherit. Contradiction with probe_sdiff (art s = CPU exact) is explained by
+context: the probe used DENSE K (direct load), the kernel uses the topk GATHER (HBM->LDS DMA into
+st_32x32) + art_k_from_rt + full 8-chunk pipeline. So the small s error is a full-kernel/gather-context
+effect, not the QK math in isolation. O stays correct (normalized ratio hides it). Reverted the exact-LSE
+change (also destabilized register allocation -> knife-edge). Kernel restored to deterministic state:
+O 0.0003, LSE 0.0167, nan=0.
+CONCLUSION: LSE parity (0.0007) NOT achieved. Blocker = isolate the in-kernel art-QK s discrepancy
+(compare in-kernel art-s vs in-kernel normal-s with the SAME gather'd K -- the probe_sdiff normal path
+is currently broken/nan and needs fixing, or instrument the kernel). O correct + deterministic stands.
