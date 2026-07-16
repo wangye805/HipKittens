@@ -233,7 +233,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -242,9 +242,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -423,7 +423,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -432,9 +432,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -611,7 +611,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -620,9 +620,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -798,7 +798,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -807,9 +807,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -999,7 +999,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1008,9 +1008,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1189,9 +1189,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 0>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1200,9 +1200,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1379,7 +1379,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1388,9 +1388,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1566,7 +1566,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1575,9 +1575,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1761,7 +1761,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1770,9 +1770,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1902,7 +1902,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<5, 0>(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}), K_j_col_addr);
       load<6, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -1949,7 +1949,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -1958,9 +1958,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2089,7 +2089,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<5, 0>(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}), K_j_col_addr);
       load<6, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -2136,7 +2136,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2145,9 +2145,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2275,7 +2275,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<5, 0>(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}), K_j_col_addr);
       load<6, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
@@ -2323,7 +2323,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<3, 1>(K_j, subtile_inplace<WARP_SIZE_KV, D>(K_j_smem, {warpid, 0}), K_j_addr);
       mma_ABt<0, 1, 1>(P_ij, Q_i, K_j, P_ij);
       mul<0, 0>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 2, 0>(P_ij, Q_i, K_j);
       // Load dO_i from shared memory to registers
       // load(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2332,9 +2332,9 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<0, 1>(dO_i, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}), dO_i_addr);
       mma_ABt<0, 2, 1>(P_ij, Q_i, K_j, P_ij);
       sub_row<0, 0, L_i>(P_ij, P_ij);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mul<0, 1>(P_ij, P_ij, P_SCALE_FACTOR);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       mma_ABt<0, 3, 0>(P_ij, Q_i, K_j);
       // Load dO_i_col from shared memory to registers
       // load(dO_i_col, subtile_inplace<DOT_SLICE_QO, D>(dO_i_smem[tic][0], {0, 0}));
@@ -2458,7 +2458,7 @@ __global__ __attribute__((amdgpu_num_vgpr(29))) void attend_bwd_combined_ker(con
       load<5, 0>(K_j_col, subtile_inplace<256, 16>(K_j_smem, {0, warpid}), K_j_col_addr);
       load<6, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
       load<7, 0>(dP_ij_bf16_col_T, attn_i_smem, dP_ij_bf16_col_T_addr);
-      asm volatile("s_waitcnt lgkmcnt(6)");
+      asm volatile("s_waitcnt lgkmcnt(2)");  // [fix] hd64 2 K-steps: was hd128-inherited (6)=no-op (only 4 outstanding); (2) gates n2/n3
       __builtin_amdgcn_s_barrier();
       // 15. dQ_i += dS_ij @ K_j (32x16)=(32x256)x(256x16)
       // mma_AtB(dQ_i_T, K_j_col, dP_ij_bf16_col_T);
