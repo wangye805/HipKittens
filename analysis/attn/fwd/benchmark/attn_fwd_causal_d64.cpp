@@ -194,6 +194,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s> (&k_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s>, 2>();
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s> (&v_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s>, 2>();
     
+    static_assert(D == ATTN_D, "attend_ker only instantiated with D==ATTN_D; ATTN_D-typed tile/vec decls rely on it (hk_clang22_build_blocker.md)");
     const int head_idx = (blockIdx.x % ATTN_H_KV) * GROUP_SIZE + (blockIdx.x / ATTN_H_KV);
     const int batch_idx = blockIdx.z;
     const int head_idx_kv = head_idx / GROUP_SIZE;
@@ -239,17 +240,17 @@ __global__ void attend_ker(const attn_globals<D> g) {
     uint32_t neg_inf_v = 0xff800000;
 
     // Initialize all of the register tiles.
-    qo_tile<D, bf16> q_reg; // Q and K are both row layout, as we use mma_ABt.
-    qo_tile_transposed<D, bf16> q_reg_transposed;
-    kv_tile<D, bf16> k_reg;
-    kv_tile_transposed<D, bf16> k_reg_transposed;
+    qo_tile<ATTN_D, bf16> q_reg; // Q and K are both row layout, as we use mma_ABt.
+    qo_tile_transposed<ATTN_D, bf16> q_reg_transposed;
+    kv_tile<ATTN_D, bf16> k_reg;
+    kv_tile_transposed<ATTN_D, bf16> k_reg_transposed;
 
-    kv_tile<D, bf16, col_l, rt_16x32_4_s> v_reg;
-    qo_tile_transposed<D, float, col_l, rt_32x32_s> o_reg; // Output tile.
-    attn_tile<D, float, col_l, rt_32x32_s> att_block[2]; // attention tile, in float.
-    attn_tile<D, bf16, col_l, rt_32x32_s> att_block_bf16;
-    attn_tile<D, bf16, col_l, rt_16x32_4_s> att_block_bf16_in;
-    typename attn_tile<D, float, col_l, rt_32x32_s>::row_vec max_vec, norm_vec, max_vec_prev, scale_vec;
+    kv_tile<ATTN_D, bf16, col_l, rt_16x32_4_s> v_reg;
+    qo_tile_transposed<ATTN_D, float, col_l, rt_32x32_s> o_reg; // Output tile.
+    attn_tile<ATTN_D, float, col_l, rt_32x32_s> att_block[2]; // attention tile, in float.
+    attn_tile<ATTN_D, bf16, col_l, rt_32x32_s> att_block_bf16;
+    attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s> att_block_bf16_in;
+    typename attn_tile<ATTN_D, float, col_l, rt_32x32_s>::row_vec max_vec, norm_vec, max_vec_prev, scale_vec;
 
     zero(o_reg);
     zero(norm_vec);
@@ -270,8 +271,8 @@ __global__ void attend_ker(const attn_globals<D> g) {
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
 
-    qo_tile<D, float> q_reg_fl;
-    load<1, qo_tile<D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {batch_idx, tile_idx, head_idx, 0});
+    qo_tile<ATTN_D, float> q_reg_fl;
+    load<1, qo_tile<ATTN_D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {batch_idx, tile_idx, head_idx, 0});
     mul(q_reg_fl, q_reg_fl, TEMPERATURE_SCALE);  // Use sqrtf for clarity
     copy(q_reg, q_reg_fl);
     transpose(q_reg_transposed, q_reg);
@@ -339,7 +340,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         }
         col_sum(norm_vec, att_block[0], norm_vec);
         copy(att_block_bf16, att_block[0]);
-        att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+        att_block_bf16_in = *reinterpret_cast<attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
         sched_barrier_exp_pairs<6, 3, 1>();
         sched_barrier_pairs<10, 5, 1>();
         __builtin_amdgcn_sched_barrier(0);
@@ -412,7 +413,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         }
         col_sum(norm_vec, att_block[1], norm_vec);
         copy(att_block_bf16, att_block[1]);
-        att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+        att_block_bf16_in = *reinterpret_cast<attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
         sched_barrier_exp_pairs<6, 3, 3>();
         sched_barrier_pairs<10, 5, 3>();
         // __builtin_amdgcn_s_setprio(0);
@@ -492,7 +493,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     col_sum(norm_vec, att_block[0], norm_vec);
     copy(att_block_bf16, att_block[0]);
-    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
     sched_barrier_exp_pairs<6, 3, 5>();
     sched_barrier_pairs<10, 5, 5>();
     __builtin_amdgcn_sched_barrier(0);
@@ -557,7 +558,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     mul(norm_vec, norm_vec, scale_vec);
     col_sum(norm_vec, att_block[1], norm_vec);
     copy(att_block_bf16, att_block[1]);
-    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
     sched_barrier_exp_pairs<6, 3, 7>();
     sched_barrier_pairs<10, 5, 7>();
     __builtin_amdgcn_sched_barrier(0);
@@ -619,7 +620,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     mul(norm_vec, norm_vec, scale_vec);
     col_sum(norm_vec, att_block[0], norm_vec);
     copy(att_block_bf16, att_block[0]);
-    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
     sched_barrier_exp_pairs<6, 3, 9>();
     sched_barrier_pairs<10, 5, 9>();
     __builtin_amdgcn_sched_barrier(0);
@@ -661,7 +662,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     col_sum(norm_vec, att_block[1], norm_vec);
     copy(att_block_bf16, att_block[1]);
-    att_block_bf16_in = *reinterpret_cast<attn_tile<D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
+    att_block_bf16_in = *reinterpret_cast<attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s>*>(&att_block_bf16);
 
     __builtin_amdgcn_sched_barrier(0);
     mul_col(o_reg, o_reg, scale_vec);
@@ -689,7 +690,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         __builtin_amdgcn_s_barrier();
     }
 
-    qo_tile<D, float, row_l, rt_32x32_s> o_reg_transposed;
+    qo_tile<ATTN_D, float, row_l, rt_32x32_s> o_reg_transposed;
     transpose(o_reg_transposed, o_reg);
     store<1>(g.Og, o_reg_transposed, {batch_idx, tile_idx, head_idx, 0});
 
