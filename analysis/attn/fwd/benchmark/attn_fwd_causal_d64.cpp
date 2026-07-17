@@ -19,6 +19,14 @@ constexpr int GROUP_SIZE = ATTN_H / ATTN_H_KV; // queries per KV head group
 constexpr int ATTN_N = 8192; // sequence length
 #endif
 
+#ifndef ATTN_N_KV
+constexpr int ATTN_N_KV = ATTN_N; // KV sequence length (S_kv)
+#endif
+#ifndef ATTN_N_Q
+constexpr int ATTN_N_Q = ATTN_N;  // Q sequence length (S_q)
+#endif
+constexpr int CAUSAL_DELTA = ATTN_N_KV - ATTN_N_Q; // bottom-right causal diagonal shift
+
 #ifndef ATTN_D
 constexpr int ATTN_D = 64; // dimension
 #endif
@@ -117,7 +125,7 @@ __device__ inline void mask_kv_tile(RT &dst, int q_abs, int k_abs, uint32_t neg_
     const int col  = lane & 31;                 // 0..31 column within the 32-wide col tile
 
     // Absolute positions
-    const int q_base = q_abs * Q_BLOCK_SIZE;    // start index for this Q tile
+    const int q_base = q_abs * Q_BLOCK_SIZE + CAUSAL_DELTA;    // start index for this Q tile
     const int k_base = k_abs * KV_BLOCK_SIZE;   // start index for this K/V tile
 
     // q position for this lane's column
@@ -173,7 +181,7 @@ template<int D> struct attn_globals {
     _gl_QKVO Qg, Kg, Vg, Og; 
     gl<float, -1, -1, -1, -1> L_vec;
     hipStream_t stream;
-    dim3 grid() { return dim3(ATTN_H, ((ATTN_N / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
+    dim3 grid() { return dim3(ATTN_H, ((ATTN_N_Q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
@@ -186,7 +194,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s> (&k_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s>, 2>();
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s> (&v_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s>, 2>();
     
-    const int head_idx = (blockIdx.x % GROUP_SIZE) * GROUP_SIZE + (blockIdx.x / GROUP_SIZE);
+    const int head_idx = (blockIdx.x % ATTN_H_KV) * GROUP_SIZE + (blockIdx.x / ATTN_H_KV);
     const int batch_idx = blockIdx.z;
     const int head_idx_kv = head_idx / GROUP_SIZE;
     const int block_tile_idx = blockIdx.y;
@@ -200,8 +208,8 @@ __global__ void attend_ker(const attn_globals<D> g) {
     const bf16* v_base = (bf16*)&g.Vg[{batch_idx, 0, head_idx_kv, 0}];
     const int k_row_stride = g.Kg.template stride<1>() * sizeof(bf16);
     const int v_row_stride = g.Vg.template stride<1>() * sizeof(bf16);
-    i32x4 k_srsrc_base = make_srsrc(k_base, k_row_stride * ATTN_N, k_row_stride);
-    i32x4 v_srsrc_base = make_srsrc(v_base, v_row_stride * ATTN_N, v_row_stride);
+    i32x4 k_srsrc_base = make_srsrc(k_base, k_row_stride * ATTN_N_KV, k_row_stride);
+    i32x4 v_srsrc_base = make_srsrc(v_base, v_row_stride * ATTN_N_KV, v_row_stride);
 
     const int wid = warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(bf16)) * kittens::WARP_THREADS;
@@ -219,10 +227,10 @@ __global__ void attend_ker(const attn_globals<D> g) {
     ));
     /********** Swizzle **********/
 
-    const int num_tiles = ATTN_N / KV_BLOCK_SIZE;
+    const int num_tiles = ATTN_N_KV / KV_BLOCK_SIZE;
     const int max_tile_idx = block_tile_idx * NUM_WARPS + NUM_WARPS - 1;
     const int max_q_end_pos = (max_tile_idx + 1) * Q_BLOCK_SIZE;
-    int max_num_tiles = (max_q_end_pos + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
+    int max_num_tiles = (max_q_end_pos + CAUSAL_DELTA + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
     if constexpr (causal) max_num_tiles = min(max_num_tiles, num_tiles);
     else max_num_tiles = num_tiles;
     const int q_start_pos = tile_idx * Q_BLOCK_SIZE;
