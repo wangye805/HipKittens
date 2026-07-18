@@ -489,7 +489,15 @@ __global__ void attend_ker(const attn_globals<D> g) {
     mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
     //      Finish softmax for QK2
     exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
-    mul(norm_vec, norm_vec, scale_vec);
+    // BUGFIX: the deferred norm rescale carried from the hot loop's last iteration
+    // must be applied only if that iteration actually deferred a scale (pending_scale).
+    // The hot loop guards this mul with `if (pending_scale)`; the epilogue previously
+    // applied it unconditionally, so a loop that exited on the lazy "revert" branch
+    // (all_ok -> pending_scale=0, scale_vec left stale <1) would shrink norm_vec and
+    // collapse the denominator for the last q-tile (data-dependent). See seed-3 repro.
+    if (pending_scale) {
+        mul(norm_vec, norm_vec, scale_vec);
+    }
 
     col_sum(norm_vec, att_block[0], norm_vec);
     copy(att_block_bf16, att_block[0]);
