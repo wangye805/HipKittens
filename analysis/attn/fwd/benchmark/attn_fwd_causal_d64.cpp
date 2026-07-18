@@ -121,11 +121,11 @@ __device__ inline void mask_vec2_imm(uint32_t rel_vgpr, uint32_t neg_inf_vgpr,
 }
 
 template<ducks::rt::col_layout RT>
-__device__ inline void mask_kv_tile(RT &dst, int q_abs, int k_abs, uint32_t neg_inf_v, int lane) {
+__device__ inline void mask_kv_tile(RT &dst, int q_abs, int k_abs, uint32_t neg_inf_v, int lane, int causal_delta) {
     const int col  = lane & 31;                 // 0..31 column within the 32-wide col tile
 
     // Absolute positions
-    const int q_base = q_abs * Q_BLOCK_SIZE + CAUSAL_DELTA;    // start index for this Q tile
+    const int q_base = q_abs * Q_BLOCK_SIZE + causal_delta;    // start index for this Q tile
     const int k_base = k_abs * KV_BLOCK_SIZE;   // start index for this K/V tile
 
     // q position for this lane's column
@@ -180,8 +180,17 @@ __device__ inline void mask_kv_tile(RT &dst, int q_abs, int k_abs, uint32_t neg_
 template<int D> struct attn_globals { 
     _gl_QKVO Qg, Kg, Vg, Og; 
     gl<float, -1, -1, -1, -1> L_vec;
+#ifdef HK_VARLEN
+    gl<int, -1, -1, -1, -1> cu_seqlens_q; // [B+1] prefix sums (packed layout)
+    gl<int, -1, -1, -1, -1> cu_seqlens_k; // [B+1] prefix sums
+    int max_seqlen_q;                     // grid sizing
+#endif
     hipStream_t stream;
+#ifdef HK_VARLEN
+    dim3 grid() { return dim3(ATTN_H, ((max_seqlen_q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
+#else
     dim3 grid() { return dim3(ATTN_H, ((ATTN_N_Q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
+#endif
     dim3 block() { return dim3(NUM_THREADS); }
     size_t dynamic_shared_memory() { return MAX_SHARED_MEMORY; }
 };
@@ -194,7 +203,6 @@ __global__ void attend_ker(const attn_globals<D> g) {
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s> (&k_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_32x32_s>, 2>();
     st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s> (&v_smem)[2] = al.allocate<st_bf<KV_BLOCK_SIZE, ATTN_D, st_8x32_s>, 2>();
     
-    static_assert(D == ATTN_D, "attend_ker only instantiated with D==ATTN_D; ATTN_D-typed tile/vec decls rely on it (hk_clang22_build_blocker.md)");
     const int head_idx = (blockIdx.x % ATTN_H_KV) * GROUP_SIZE + (blockIdx.x / ATTN_H_KV);
     const int batch_idx = blockIdx.z;
     const int head_idx_kv = head_idx / GROUP_SIZE;
@@ -203,14 +211,37 @@ __global__ void attend_ker(const attn_globals<D> g) {
     const int stagger = warpid() / 4;
     const int lane = laneid();
 
+#ifdef HK_VARLEN
+    const int b_seq       = batch_idx;                       // logical batch
+    const int bidx        = 0;                               // packed batch dim
+    const int q_row_start = g.cu_seqlens_q[{0, 0, 0, b_seq}];
+    const int k_row_start = g.cu_seqlens_k[{0, 0, 0, b_seq}];
+    const int seqlen_q    = g.cu_seqlens_q[{0, 0, 0, b_seq + 1}] - q_row_start;
+    const int seqlen_k    = g.cu_seqlens_k[{0, 0, 0, b_seq + 1}] - k_row_start;
+    const int q_tile0     = q_row_start / Q_BLOCK_SIZE;      // requires cu_seqlens_q % Q_BLOCK == 0
+    const int k_tile0     = k_row_start / KV_BLOCK_SIZE;     // requires cu_seqlens_k % KV_BLOCK == 0
+    const int causal_delta_rt = seqlen_k - seqlen_q;
+    if (block_tile_idx * NUM_WARPS * Q_BLOCK_SIZE >= seqlen_q) return; // whole CTA past this seq
+#else
+    const int bidx        = batch_idx;
+    constexpr int q_tile0 = 0, k_tile0 = 0;
+    constexpr int seqlen_q = ATTN_N_Q, seqlen_k = ATTN_N_KV;
+    constexpr int causal_delta_rt = CAUSAL_DELTA;
+#endif
+
     /********** Readfirstlane hoisting **********/
     // Create base buffer resources once
-    const bf16* k_base = (bf16*)&g.Kg[{batch_idx, 0, head_idx_kv, 0}];
-    const bf16* v_base = (bf16*)&g.Vg[{batch_idx, 0, head_idx_kv, 0}];
+    const bf16* k_base = (bf16*)&g.Kg[{bidx, 0, head_idx_kv, 0}];
+    const bf16* v_base = (bf16*)&g.Vg[{bidx, 0, head_idx_kv, 0}];
     const int k_row_stride = g.Kg.template stride<1>() * sizeof(bf16);
     const int v_row_stride = g.Vg.template stride<1>() * sizeof(bf16);
-    i32x4 k_srsrc_base = make_srsrc(k_base, k_row_stride * ATTN_N_KV, k_row_stride);
-    i32x4 v_srsrc_base = make_srsrc(v_base, v_row_stride * ATTN_N_KV, v_row_stride);
+#ifdef HK_VARLEN
+    const int kv_extent = k_row_start + seqlen_k; // packed rows up to end of this seq
+#else
+    constexpr int kv_extent = ATTN_N_KV;
+#endif
+    i32x4 k_srsrc_base = make_srsrc(k_base, k_row_stride * kv_extent, k_row_stride);
+    i32x4 v_srsrc_base = make_srsrc(v_base, v_row_stride * kv_extent, v_row_stride);
 
     const int wid = warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(bf16)) * kittens::WARP_THREADS;
@@ -228,18 +259,40 @@ __global__ void attend_ker(const attn_globals<D> g) {
     ));
     /********** Swizzle **********/
 
-    const int num_tiles = ATTN_N_KV / KV_BLOCK_SIZE;
+    const int num_tiles = seqlen_k / KV_BLOCK_SIZE;
     const int max_tile_idx = block_tile_idx * NUM_WARPS + NUM_WARPS - 1;
     const int max_q_end_pos = (max_tile_idx + 1) * Q_BLOCK_SIZE;
-    int max_num_tiles = (max_q_end_pos + CAUSAL_DELTA + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
-    if constexpr (causal) max_num_tiles = min(max_num_tiles, num_tiles);
-    else max_num_tiles = num_tiles;
+    int max_num_tiles = (max_q_end_pos + causal_delta_rt + KV_BLOCK_SIZE - 1) / KV_BLOCK_SIZE;
+    if constexpr (causal) {
+        max_num_tiles = min(max_num_tiles, num_tiles);
+#ifdef HK_VARLEN
+        // BUGFIX #4 (varlen only): the software-pipeline drain (prologue=3 tiles + hot-loop pairs
+        // j+=2 + fixed epilogue) requires an EVEN, >=4 per-CTA tile count. Square/batch N is always
+        // a multiple of 4 so it never needs this; but varlen's arbitrary per-sequence num_tiles can
+        // be odd or tiny, which misaligns the epilogue (odd -> wrong tiles/garbage; <=3 -> negative
+        // tile index -> OOB fault). Round up to even (>=4). The extra tile(s) are past the causal
+        // diagonal (fully -inf-masked); reading them requires the caller to TAIL-PAD the packed K/V
+        // by >=4 KV tiles (256 rows) of zeros (a 1-tile last sequence overreads up to 3 tiles).
+        // This is gated to varlen because batch tensors are NOT padded (rounding there could OOB).
+        max_num_tiles = max(4, max_num_tiles + (max_num_tiles & 1));
+#endif
+    } else {
+        max_num_tiles = num_tiles;
+    }
     const int q_start_pos = tile_idx * Q_BLOCK_SIZE;
 
     constexpr float TEMPERATURE_SCALE = (D == 128) ? 0.08838834764f*1.44269504089f : 0.125f*1.44269504089f;
     uint32_t neg_inf_v = 0xff800000;
 
     // Initialize all of the register tiles.
+    static_assert(D == ATTN_D, "attend_ker is only instantiated with D==ATTN_D; the ATTN_D-typed tile/vec "
+                               "declarations below rely on this (see hk_clang22_build_blocker.md).");
+    // Declare all register tiles/vectors with ATTN_D (a non-dependent constexpr == the template arg D,
+    // since attend_ker is only ever instantiated with D=ATTN_D). These types are identical to the D-form
+    // but NON-dependent, so their ops are resolved at definition time — sidestepping a clang-22
+    // (ROCm 7.2.x/7.3) concept-satisfaction regression that otherwise makes register-tile/vector ops
+    // (zero/ones/mul/... ) ambiguous during template instantiation. See hk_clang22_build_blocker.md.
+    // clang-20 does not need this; it is harmless there.
     qo_tile<ATTN_D, bf16> q_reg; // Q and K are both row layout, as we use mma_ABt.
     qo_tile_transposed<ATTN_D, bf16> q_reg_transposed;
     kv_tile<ATTN_D, bf16> k_reg;
@@ -250,6 +303,11 @@ __global__ void attend_ker(const attn_globals<D> g) {
     attn_tile<ATTN_D, float, col_l, rt_32x32_s> att_block[2]; // attention tile, in float.
     attn_tile<ATTN_D, bf16, col_l, rt_32x32_s> att_block_bf16;
     attn_tile<ATTN_D, bf16, col_l, rt_16x32_4_s> att_block_bf16_in;
+    // NOTE: use ATTN_D (a non-dependent constexpr = D), not the template param D, for the register-vector
+    // type. attn_tile ignores its first template arg, so this is the SAME type, but making it
+    // non-dependent avoids a clang-22 (ROCm 7.2.x/7.3) concept-satisfaction regression that makes
+    // register-vector ops (zero/ones/mul/sub on row_vec) ambiguous during template instantiation.
+    // See hk_clang22_build_blocker.md. clang-20 does not need this; it is harmless there.
     typename attn_tile<ATTN_D, float, col_l, rt_32x32_s>::row_vec max_vec, norm_vec, max_vec_prev, scale_vec;
 
     zero(o_reg);
@@ -266,21 +324,31 @@ __global__ void attend_ker(const attn_globals<D> g) {
     G::prefill_swizzled_offsets<1, false>(k_smem[0], g.Kg, swizzled_offsets_K);
     G::prefill_swizzled_offsets<1, false>(v_smem[0], g.Vg, swizzled_offsets_V);
 
-    G::load<1, false>(k_smem[0], g.Kg, {batch_idx, 0, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_0);
+    G::load<1, false>(k_smem[0], g.Kg, {bidx, (0) + k_tile0, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_0);
     __builtin_amdgcn_s_waitcnt(0);
     __builtin_amdgcn_sched_barrier(0);
     __builtin_amdgcn_s_barrier();
 
     qo_tile<ATTN_D, float> q_reg_fl;
-    load<1, qo_tile<ATTN_D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {batch_idx, tile_idx, head_idx, 0});
+#ifdef HK_VARLEN
+    // Warps whose Q tile is past this seq's length must NOT do the (unbounded) per-warp
+    // global Q load — it would read past the packed tensor and fault. They still run the
+    // pipeline (K/V loads are srsrc-bounded/safe) but their result is not stored.
+    if (q_start_pos < seqlen_q)
+        load<1, qo_tile<ATTN_D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {bidx, tile_idx + q_tile0, head_idx, 0});
+    else
+        zero(q_reg_fl);
+#else
+    load<1, qo_tile<ATTN_D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {bidx, tile_idx + q_tile0, head_idx, 0});
+#endif
     mul(q_reg_fl, q_reg_fl, TEMPERATURE_SCALE);  // Use sqrtf for clarity
     copy(q_reg, q_reg_fl);
     transpose(q_reg_transposed, q_reg);
 
     // All warps then collaboratively load in the first slice of V (V0) and the second slice of K (K1) into shared memory
-    G::load<1, false>(k_smem[1], g.Kg, {batch_idx, 1, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_1);
+    G::load<1, false>(k_smem[1], g.Kg, {bidx, (1) + k_tile0, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_1);
     // All warps then load in the first slice of K (K0)
-    G::load<1, false>(v_smem[0], g.Vg, {batch_idx, 0, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_0);
+    G::load<1, false>(v_smem[0], g.Vg, {bidx, (0) + k_tile0, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_0);
     load(k_reg, k_smem[0]);
     __builtin_amdgcn_sched_barrier(0);
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -296,7 +364,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     if constexpr (causal) { 
         const int kv_end_pos = (1) * KV_BLOCK_SIZE;
         if (__builtin_expect(q_start_pos < kv_end_pos, 0)) {  // Only mask if needed
-            mask_kv_tile(att_block[0], tile_idx, 0, neg_inf_v, lane);
+            mask_kv_tile(att_block[0], tile_idx, 0, neg_inf_v, lane, causal_delta_rt);
         }
     }
     // Each warp performs a partial softmax of QK0 (i.e. some of the online softmax up until but not including the second exponential scaling of the attention block likely)
@@ -315,9 +383,9 @@ __global__ void attend_ker(const attn_globals<D> g) {
     // All warps then load in the second slice of K (K1)
     load(k_reg, k_smem[1]);
     // All warps then collaboratively load in the third slice of K (K2) into shared memory
-    G::load<1, false>(k_smem[0], g.Kg, {batch_idx, 2, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_0);
+    G::load<1, false>(k_smem[0], g.Kg, {bidx, (2) + k_tile0, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_0);
     // All warps then collaboratively load in the second slice of V (V1) into shared memory 
-    G::load<1, false>(v_smem[1], g.Vg, {batch_idx, 1, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_1);
+    G::load<1, false>(v_smem[1], g.Vg, {bidx, (1) + k_tile0, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_1);
     asm volatile("s_waitcnt lgkmcnt(0)");
     asm volatile("s_waitcnt vmcnt(2)");
     __builtin_amdgcn_sched_barrier(0);
@@ -348,8 +416,8 @@ __global__ void attend_ker(const attn_globals<D> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 1:
-        //      Load K3 into shared 
-        G::load<1, false>(k_smem[1], g.Kg, {batch_idx, j, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_1);
+        //      Load K3 into shared
+        G::load<1, false>(k_smem[1], g.Kg, {bidx, (j) + k_tile0, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_1);
         //      Load V0 into registers
         load(v_reg, v_smem[0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -379,10 +447,8 @@ __global__ void attend_ker(const attn_globals<D> g) {
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 1), subtile_inplace<16>(att_block_bf16_in, 1), o_reg);
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 2), subtile_inplace<16>(att_block_bf16_in, 2), o_reg);
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 3), subtile_inplace<16>(att_block_bf16_in, 3), o_reg);
-        // BUGFIX #2: rescale o_reg AFTER the full tile's 4-chunk P·V is accumulated, not between
-        // chunk 0 and chunks 1-3. In the rescale branch (scale_vec!=1) the old placement scaled
-        // chunk 0 but not chunks 1-3, splitting one tile's contribution across two max regimes
-        // (numerator-only error on rows where the branch fires; norm/LSE stayed correct).
+        // BUGFIX #2 (see d1fb222): rescale o_reg AFTER the full tile's 4-chunk P·V, not between
+        // chunk 0 and chunks 1-3 (that splits one tile across two max regimes when scale_vec!=1).
         if (pending_scale) { mul_col(o_reg, o_reg, scale_vec); }
         sub_col(att_block[1], att_block[1], max_vec);
         exp2(att_block[1].tiles[0][0], att_block[1].tiles[0][0]);
@@ -395,7 +461,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
         // Cluster 3:
         //      Load V2 into shared
-        G::load<1, false>(v_smem[0], g.Vg, {batch_idx, j - 1, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_0);
+        G::load<1, false>(v_smem[0], g.Vg, {bidx, (j - 1) + k_tile0, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_0);
         //      Load K2 into registers
         load(k_reg, k_smem[0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -427,13 +493,13 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
         // Cluster 5:
         //      Load K4 into shared
-        G::load<1, false>(k_smem[0], g.Kg, {batch_idx, j + 1, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_0);
+        G::load<1, false>(k_smem[0], g.Kg, {bidx, (j + 1) + k_tile0, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_0);
         //      Load V1 into registers
         load(v_reg, v_smem[1]);
         if constexpr (causal) {
             const int kv_end_pos = (j) * KV_BLOCK_SIZE;
             if (q_start_pos < kv_end_pos) {  // Only mask if needed
-                mask_kv_tile(att_block[0], tile_idx, j - 1, neg_inf_v, lane);
+                mask_kv_tile(att_block[0], tile_idx, j - 1, neg_inf_v, lane, causal_delta_rt);
             }
         }
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -463,7 +529,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 1), subtile_inplace<16>(att_block_bf16_in, 1), o_reg);
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 2), subtile_inplace<16>(att_block_bf16_in, 2), o_reg);
         mma_AtB(o_reg, subtile_inplace<16>(v_reg, 3), subtile_inplace<16>(att_block_bf16_in, 3), o_reg);
-        // BUGFIX #2 (see cluster-2 note): rescale o_reg AFTER the full tile's 4-chunk P·V.
+        // BUGFIX #2 (see d1fb222): rescale o_reg AFTER the full tile's 4-chunk P·V.
         if (pending_scale) { mul_col(o_reg, o_reg, scale_vec); }
         sub_col(att_block[0], att_block[0], max_vec);
         exp2(att_block[0].tiles[0][0], att_block[0].tiles[0][0]);
@@ -476,7 +542,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
         // Cluster 7:
         //      Load V3 into shared
-        G::load<1, false>(v_smem[1], g.Vg, {batch_idx, j, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_1);
+        G::load<1, false>(v_smem[1], g.Vg, {bidx, (j) + k_tile0, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_1);
         //      Load K3 into registers
         load(k_reg, k_smem[1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -494,12 +560,9 @@ __global__ void attend_ker(const attn_globals<D> g) {
     mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
     //      Finish softmax for QK2
     exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
-    // BUGFIX: the deferred norm rescale carried from the hot loop's last iteration
-    // must be applied only if that iteration actually deferred a scale (pending_scale).
-    // The hot loop guards this mul with `if (pending_scale)`; the epilogue previously
-    // applied it unconditionally, so a loop that exited on the lazy "revert" branch
-    // (all_ok -> pending_scale=0, scale_vec left stale <1) would shrink norm_vec and
-    // collapse the denominator for the last q-tile (data-dependent). See seed-3 repro.
+    // BUGFIX #1: guard the deferred norm rescale (see fce134a). The hot loop applies it as
+    // `if (pending_scale) mul(...)`; the epilogue must too, else a loop exiting on the lazy
+    // "revert" branch (pending_scale=0, stale scale_vec<1) shrinks norm_vec -> denominator collapse.
     if (pending_scale) {
         mul(norm_vec, norm_vec, scale_vec);
     }
@@ -515,13 +578,13 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     // Cluster 1:
     //      Load K5 into shared
-    G::load<1, false>(k_smem[1], g.Kg, {batch_idx, max_num_tiles - 1, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_1);
+    G::load<1, false>(k_smem[1], g.Kg, {bidx, (max_num_tiles - 1) + k_tile0, head_idx_kv, 0}, swizzled_offsets_K, k_srsrc_base, k_base, k_lds_base_1);
     //      Load V2 into registers
     load(v_reg, v_smem[0]);
     if constexpr (causal) {
         const int kv_end_pos = (max_num_tiles - 2) * KV_BLOCK_SIZE;
         if (__builtin_expect(q_start_pos < kv_end_pos, 0)) {  // Only mask if needed
-            mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 3, neg_inf_v, lane);
+            mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 3, neg_inf_v, lane, causal_delta_rt);
         }
     }
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -552,7 +615,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     // Cluster 3:
     //      Load V4 into shared
-    G::load<1, false>(v_smem[0], g.Vg, {batch_idx, max_num_tiles - 2, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_0);
+    G::load<1, false>(v_smem[0], g.Vg, {bidx, (max_num_tiles - 2) + k_tile0, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_0);
     //      Load K4 into registers
     load(k_reg, k_smem[0]);
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -584,7 +647,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     if constexpr (causal) {
         const int kv_end_pos = (max_num_tiles - 1) * KV_BLOCK_SIZE;
         if (__builtin_expect(q_start_pos < kv_end_pos, 1)) {  // Only mask if needed
-            mask_kv_tile(att_block[0], tile_idx, max_num_tiles - 2, neg_inf_v, lane);
+            mask_kv_tile(att_block[0], tile_idx, max_num_tiles - 2, neg_inf_v, lane, causal_delta_rt);
         }
     }
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -614,7 +677,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     // Cluster 7:
     //      Load V5 into shared
-    G::load<1, false>(v_smem[1], g.Vg, {batch_idx, max_num_tiles - 1, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_1);
+    G::load<1, false>(v_smem[1], g.Vg, {bidx, (max_num_tiles - 1) + k_tile0, head_idx_kv, 0}, swizzled_offsets_V, v_srsrc_base, v_base, v_lds_base_1);
     //      Load K5 into registers
     load(k_reg, k_smem[1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -646,7 +709,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     if constexpr (causal) {
         const int kv_end_pos = (max_num_tiles) * KV_BLOCK_SIZE;
         if (__builtin_expect(q_start_pos < kv_end_pos, 1)) {  // Only mask if needed
-            mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 1, neg_inf_v, lane);
+            mask_kv_tile(att_block[1], tile_idx, max_num_tiles - 1, neg_inf_v, lane, causal_delta_rt);
         }
     }
     asm volatile("s_waitcnt lgkmcnt(0)");
@@ -705,13 +768,19 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     qo_tile<ATTN_D, float, row_l, rt_32x32_s> o_reg_transposed;
     transpose(o_reg_transposed, o_reg);
-    store<1>(g.Og, o_reg_transposed, {batch_idx, tile_idx, head_idx, 0});
-
     // multiply by ln(2)
     mul(max_vec, max_vec, 0.69314718056f);
     log(norm_vec, norm_vec);
     add(norm_vec, norm_vec, max_vec);
-    store(g.L_vec, norm_vec, {batch_idx, head_idx, 0, tile_idx});
+#ifdef HK_VARLEN
+    if (q_start_pos < seqlen_q) {
+        store<1>(g.Og, o_reg_transposed, {bidx, tile_idx + q_tile0, head_idx, 0});
+        store(g.L_vec, norm_vec, {bidx, head_idx, 0, tile_idx + q_tile0});
+    }
+#else
+    store<1>(g.Og, o_reg_transposed, {bidx, tile_idx + q_tile0, head_idx, 0});
+    store(g.L_vec, norm_vec, {bidx, head_idx, 0, tile_idx + q_tile0});
+#endif
 }
 
 template<int D>
@@ -729,5 +798,10 @@ PYBIND11_MODULE(tk_kernel, m) {
         &attn_globals<ATTN_D>::Vg, 
         &attn_globals<ATTN_D>::Og,
         &attn_globals<ATTN_D>::L_vec
+#ifdef HK_VARLEN
+        , &attn_globals<ATTN_D>::cu_seqlens_q
+        , &attn_globals<ATTN_D>::cu_seqlens_k
+        , &attn_globals<ATTN_D>::max_seqlen_q
+#endif
     );
 }
