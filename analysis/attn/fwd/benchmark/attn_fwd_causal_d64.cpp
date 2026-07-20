@@ -439,6 +439,21 @@ __global__ void attend_ker(const attn_globals<D> g) {
         zero(att_block[1]);
         transpose(k_reg_transposed, k_reg);
         mma_AtB(att_block[1], k_reg_transposed, q_reg_transposed, att_block[1]);
+        // BUGFIX #5: also mask the ODD tile (att_block[1] = tile j-2). The loop only masked
+        // att_block[0] (even tiles, j-1 at cluster 5); the odd tiles were NEVER masked. For self-attn
+        // (delta==0) those are always fully-attend (no-op), but for non-square / cross-attn with a
+        // SMALL delta the low-q rows (row r attends keys 0..r+delta) wrongly attend them -> LSE too
+        // big. Mask before att_block[1]'s col_max below. (Pre-existing non-square masking-coverage gap.)
+        // Only needed for delta>0 (non-square / cross-attn); self-attn's odd tiles are fully-attend
+        // and already covered by the existing scheme. Gating on causal_delta_rt>0 makes this compile
+        // OUT for batch (delta is constexpr 0) and skip at runtime for varlen self-attn -> zero cost
+        // for the common case; only cross-attn pays.
+        if constexpr (causal) {
+            const int kv_end_pos_odd = (j - 1) * KV_BLOCK_SIZE;   // end of tile (j-2)
+            if (causal_delta_rt > 0 && q_start_pos < kv_end_pos_odd) {
+                mask_kv_tile(att_block[1], tile_idx, j - 2, neg_inf_v, lane, causal_delta_rt);
+            }
+        }
         //      Finish softmax for QK0
         exp2(att_block[0].tiles[1][0], att_block[0].tiles[1][0]);
         if (pending_scale) {
