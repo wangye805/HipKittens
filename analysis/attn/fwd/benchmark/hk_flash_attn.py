@@ -6,7 +6,8 @@ packed layout, and an explicit num_seqs).
 
 Limitations of the current compiled kernel (baked at compile time), enforced by asserts:
   - causal only; head_dim = 64; softmax_scale = 1/sqrt(head_dim); bf16.
-  - no dropout / SWA (window_size) / softcap / alibi.
+  - no dropout / softcap / alibi. Causal SWA supported via window_size=(W, 0) (naive: all KV tiles
+    are still visited, each masked to the window band; loop-bounding is a later optimization).
   - the .so is specialized for a fixed (ATTN_H, ATTN_H_KV): H/H_KV of the inputs must match the
     kernel it was built with (a production build would compile a set and dispatch by config).
 Supported (no caller obligations): arbitrary (non-aligned) cu_seqlens, cross-attn (cu_seqlens_q !=
@@ -35,7 +36,10 @@ def flash_attn_varlen_func(
     # --- feature gates (what the compiled kernel supports) ---
     assert causal, "HK hd64 fwd is causal-only"
     assert dropout_p == 0.0, "dropout not supported"
-    assert tuple(window_size) == (-1, -1), "sliding-window attention (SWA) not supported yet"
+    wl, wr = int(window_size[0]), int(window_size[1])
+    # FA convention: (-1,-1) = no window (full causal). Causal SWA uses (W, 0). We support the causal
+    # bottom-right window (upper edge = diagonal), so window_size_right must be 0 (or -1 => full).
+    assert wr <= 0, "only causal SWA supported (window_size_right must be 0)"
     assert softcap == 0.0, "softcap not supported"
     assert alibi_slopes is None, "alibi not supported"
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3, \
@@ -61,6 +65,7 @@ def flash_attn_varlen_func(
         out.unsqueeze(0), lse,
         cu_seqlens_q, cu_seqlens_k,
         int(max_seqlen_q), int(num_seqs),
+        wl, 0,   # window_size_left (>=0 => SWA), window_size_right (causal upper => 0)
     )
     if return_lse:
         return out, lse[0, :, 0, :]   # [H, total_q], FA-style per-(head,token) LSE
