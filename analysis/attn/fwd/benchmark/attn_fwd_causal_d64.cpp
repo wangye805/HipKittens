@@ -176,8 +176,29 @@ __device__ inline void mask_kv_tile(RT &dst, int q_abs, int k_abs, uint32_t neg_
 }
 
 /**********************************************************/
+#ifdef HK_VARLEN
+// Row-bounded LSE (row_vec) store for varlen partial q-tiles. norm_vec is an ortho_l row_vec whose
+// stock store writes dst_ptr[pos] directly (ignores the buffer bound), so a partial last q-tile would
+// overrun into the next head's packed lse region ([1,H,1,total] layout) -> cross-head corruption.
+// Mirror the ortho_l branch with a `pos < valid_rows` guard so only the sequence's real rows write.
+template<ducks::rv::all RV, ducks::gl::all GL, ducks::coord::vec COORD=coord<RV>>
+__device__ inline void store_lse_bounded(const GL &dst, const RV &src, const COORD &idx, int valid_rows) {
+    using U  = typename GL::dtype;
+    using T2 = typename RV::dtype;
+    using T  = typename base_types::packing<T2>::unpacked_type;
+    static_assert(std::is_same_v<typename RV::layout, ducks::rv_layout::ortho>,
+                  "store_lse_bounded assumes an ortho_l row_vec (norm_vec of a col_l tile)");
+    U *dst_ptr = (U*)&dst[(idx.template unit_coord<-1, 3>())];
+    const int laneid = kittens::laneid();
+    #pragma unroll
+    for (int w = 0; w < RV::outer_dim; w++) {
+        const int pos = w * RV::reductions + (laneid % RV::reductions);   // q-row within the tile (0..31)
+        if (pos < valid_rows) dst_ptr[pos] = base_types::convertor<U, T>::convert(src[w][0]);
+    }
+}
+#endif
 
-template<int D> struct attn_globals { 
+template<int D> struct attn_globals {
     _gl_QKVO Qg, Kg, Vg, Og; 
     gl<float, -1, -1, -1, -1> L_vec;
 #ifdef HK_VARLEN
@@ -188,7 +209,7 @@ template<int D> struct attn_globals {
 #endif
     hipStream_t stream;
 #ifdef HK_VARLEN
-    dim3 grid() { return dim3(ATTN_H, ((max_seqlen_q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), num_seqs); }
+    dim3 grid() { return dim3(ATTN_H, (((max_seqlen_q + Q_BLOCK_SIZE - 1) / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), num_seqs); }  // ceil q-tiles (max_seqlen_q need not be Q_BLOCK-aligned)
 #else
     dim3 grid() { return dim3(ATTN_H, ((ATTN_N_Q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
 #endif
@@ -219,8 +240,9 @@ __global__ void attend_ker(const attn_globals<D> g) {
     const int k_row_start = g.cu_seqlens_k[b_seq];
     const int seqlen_q    = g.cu_seqlens_q[b_seq + 1] - q_row_start;
     const int seqlen_k    = g.cu_seqlens_k[b_seq + 1] - k_row_start;
-    const int q_tile0     = q_row_start / Q_BLOCK_SIZE;      // requires cu_seqlens_q % Q_BLOCK == 0
-    const int k_tile0     = k_row_start / KV_BLOCK_SIZE;     // requires cu_seqlens_k % KV_BLOCK == 0
+    const int q_tile0     = q_row_start / Q_BLOCK_SIZE;      // floor
+    const int k_tile0     = k_row_start / KV_BLOCK_SIZE;     // floor
+    const int rem_q       = q_row_start - q_tile0 * Q_BLOCK_SIZE;   // q_row_start % Q_BLOCK_SIZE (arbitrary align)
     const int causal_delta_rt = seqlen_k - seqlen_q;
     if (block_tile_idx * NUM_WARPS * Q_BLOCK_SIZE >= seqlen_q) return; // whole CTA past this seq
 #else
@@ -341,11 +363,17 @@ __global__ void attend_ker(const attn_globals<D> g) {
 
     qo_tile<ATTN_D, float> q_reg_fl;
 #ifdef HK_VARLEN
-    // Warps whose Q tile is past this seq's length must NOT do the (unbounded) per-warp
-    // global Q load — it would read past the packed tensor and fault. They still run the
-    // pipeline (K/V loads are srsrc-bounded/safe) but their result is not stored.
+    // Arbitrary (non-Q_BLOCK-aligned) q_row_start: shift a device copy of the Q descriptor's base
+    // pointer back by rem_q tokens, then load with the floor tile coord (tile_idx + q_tile0). The
+    // gl::operator[] is element-indexed and raw_ptr is public, so this lands the load on the exact
+    // token q_row_start + tile_idx*Q_BLOCK (same trick as the K/V base_ptr shift).
+    _gl_QKVO Qg_s = g.Qg;
+    Qg_s.raw_ptr += (size_t)rem_q * g.Qg.template stride<1>();
+    // Warps whose Q tile is past this seq's length must NOT do the (unbounded) per-warp global Q
+    // load — it would read past the packed tensor and fault. They still run the pipeline (K/V loads
+    // are srsrc-bounded/safe) but their result is not stored.
     if (q_start_pos < seqlen_q)
-        load<1, qo_tile<ATTN_D, float>, _gl_QKVO>(q_reg_fl, g.Qg, {bidx, tile_idx + q_tile0, head_idx, 0});
+        load<1, qo_tile<ATTN_D, float>, _gl_QKVO>(q_reg_fl, Qg_s, {bidx, tile_idx + q_tile0, head_idx, 0});
     else
         zero(q_reg_fl);
 #else
@@ -784,8 +812,20 @@ __global__ void attend_ker(const attn_globals<D> g) {
     add(norm_vec, norm_vec, max_vec);
 #ifdef HK_VARLEN
     if (q_start_pos < seqlen_q) {
-        store<1>(g.Og, o_reg_transposed, {bidx, tile_idx + q_tile0, head_idx, 0});
-        store(g.L_vec, norm_vec, {bidx, head_idx, 0, tile_idx + q_tile0});
+        const int valid_rows = seqlen_q - q_start_pos;   // rows of this q-tile within the sequence (>0)
+        // O store: shift base to the exact row (arbitrary q_row_start) and bound buffer_size to
+        // valid_rows so a partial last q-tile does NOT write rows >= seqlen_q into the next
+        // sequence's packed rows (which its own CTA also writes -> write race). bidx==0 for varlen,
+        // so overwriting depth_internal only tightens buffer_size; it does not affect addressing.
+        _gl_QKVO Og_b = g.Og;
+        Og_b.raw_ptr += (size_t)rem_q * g.Og.template stride<1>();
+        Og_b.depth_internal = valid_rows;
+        store<1>(Og_b, o_reg_transposed, {bidx, tile_idx + q_tile0, head_idx, 0});
+        // L_vec (LSE) store: shift base to the exact lse position (lse is contiguous in the last dim)
+        // and row-bound to valid_rows so a partial last q-tile does not overrun into the next head.
+        gl<float, -1, -1, -1, -1> Lv_b = g.L_vec;
+        Lv_b.raw_ptr += (size_t)rem_q;
+        store_lse_bounded(Lv_b, norm_vec, {bidx, head_idx, 0, tile_idx + q_tile0}, valid_rows);
     }
 #else
     store<1>(g.Og, o_reg_transposed, {bidx, tile_idx + q_tile0, head_idx, 0});
