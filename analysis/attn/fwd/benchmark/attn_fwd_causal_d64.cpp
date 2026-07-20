@@ -181,8 +181,8 @@ template<int D> struct attn_globals {
     _gl_QKVO Qg, Kg, Vg, Og; 
     gl<float, -1, -1, -1, -1> L_vec;
 #ifdef HK_VARLEN
-    gl<int, -1, -1, -1, -1> cu_seqlens_q; // [B+1] prefix sums (packed layout)
-    gl<int, -1, -1, -1, -1> cu_seqlens_k; // [B+1] prefix sums
+    const int* cu_seqlens_q;              // [B+1] token prefix sums, raw device pointer
+    const int* cu_seqlens_k;              // [B+1] token prefix sums, raw device pointer
     int max_seqlen_q;                     // grid sizing (grid.y)
     int num_seqs;                         // runtime batch size = len(cu_seqlens)-1 (grid.z)
 #endif
@@ -215,10 +215,10 @@ __global__ void attend_ker(const attn_globals<D> g) {
 #ifdef HK_VARLEN
     const int b_seq       = batch_idx;                       // logical batch
     const int bidx        = 0;                               // packed batch dim
-    const int q_row_start = g.cu_seqlens_q[{0, 0, 0, b_seq}];
-    const int k_row_start = g.cu_seqlens_k[{0, 0, 0, b_seq}];
-    const int seqlen_q    = g.cu_seqlens_q[{0, 0, 0, b_seq + 1}] - q_row_start;
-    const int seqlen_k    = g.cu_seqlens_k[{0, 0, 0, b_seq + 1}] - k_row_start;
+    const int q_row_start = g.cu_seqlens_q[b_seq];
+    const int k_row_start = g.cu_seqlens_k[b_seq];
+    const int seqlen_q    = g.cu_seqlens_q[b_seq + 1] - q_row_start;
+    const int seqlen_k    = g.cu_seqlens_k[b_seq + 1] - k_row_start;
     const int q_tile0     = q_row_start / Q_BLOCK_SIZE;      // requires cu_seqlens_q % Q_BLOCK == 0
     const int k_tile0     = k_row_start / KV_BLOCK_SIZE;     // requires cu_seqlens_k % KV_BLOCK == 0
     const int causal_delta_rt = seqlen_k - seqlen_q;
@@ -799,6 +799,20 @@ void dispatch_micro(attn_globals<D> g) {
     hipFuncSetAttribute((void*)attend_ker<D>, hipFuncAttributeMaxDynamicSharedMemorySize, mem_size);
     attend_ker<D><<<g.grid(), g.block(), mem_size, g.stream>>>(g);
 }
+
+#ifdef HK_VARLEN
+// Bind a raw device int* member (cu_seqlens) from a 1-D contiguous CUDA int32 torch.Tensor by
+// taking its data_ptr(). Lets the Python API pass a natural [B+1] tensor (no [1,1,1,B+1] reshape)
+// and the kernel index it as cu[b]. Kept in this TU so the vendored pyutils.cuh is untouched.
+namespace kittens { namespace py {
+template<> struct from_object<const int*> {
+    static const int* make(pybind11::object obj) {
+        uint64_t data_ptr = obj.attr("data_ptr")().cast<uint64_t>();
+        return reinterpret_cast<const int*>(data_ptr);
+    }
+};
+}} // namespace kittens::py
+#endif
 
 PYBIND11_MODULE(tk_kernel, m) {
     m.doc() = "tk_kernel python module";
