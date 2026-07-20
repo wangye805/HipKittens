@@ -183,11 +183,12 @@ template<int D> struct attn_globals {
 #ifdef HK_VARLEN
     gl<int, -1, -1, -1, -1> cu_seqlens_q; // [B+1] prefix sums (packed layout)
     gl<int, -1, -1, -1, -1> cu_seqlens_k; // [B+1] prefix sums
-    int max_seqlen_q;                     // grid sizing
+    int max_seqlen_q;                     // grid sizing (grid.y)
+    int num_seqs;                         // runtime batch size = len(cu_seqlens)-1 (grid.z)
 #endif
     hipStream_t stream;
 #ifdef HK_VARLEN
-    dim3 grid() { return dim3(ATTN_H, ((max_seqlen_q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
+    dim3 grid() { return dim3(ATTN_H, ((max_seqlen_q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), num_seqs); }
 #else
     dim3 grid() { return dim3(ATTN_H, ((ATTN_N_Q / Q_BLOCK_SIZE + NUM_WARPS - 1) / NUM_WARPS), ATTN_B); }
 #endif
@@ -802,6 +803,7 @@ PYBIND11_MODULE(tk_kernel, m) {
         , &attn_globals<ATTN_D>::cu_seqlens_q
         , &attn_globals<ATTN_D>::cu_seqlens_k
         , &attn_globals<ATTN_D>::max_seqlen_q
+        , &attn_globals<ATTN_D>::num_seqs
 #endif
     );
 }
