@@ -203,8 +203,12 @@ __device__ inline void mask_kv_tile_swa(RT &dst, int q_abs, int k_abs, uint32_t 
             for (int e = 0; e < 8; ++e) {
                 uint32_t* px = reinterpret_cast<uint32_t*>(&dst.tiles[i][j].data[e].x);
                 uint32_t* py = reinterpret_cast<uint32_t*>(&dst.tiles[i][j].data[e].y);
-                if (rel0 < OFFX[e] || rel0 > OFFX[e] + window_left) *px = neg_inf_v;
-                if (rel0 < OFFY[e] || rel0 > OFFY[e] + window_left) *py = neg_inf_v;
+                // Unsigned range-check: keep iff OFFX[e] <= rel0 <= OFFX[e]+window_left, i.e.
+                // (unsigned)(rel0 - OFFX[e]) <= window_left. One u32 compare per element (no second
+                // signed cmp, no s_or_b64 VCC round-trip, no s_add threshold chain) -> ~half the mask
+                // cost. window_left >= 0 whenever this runs (SWA only). Math-identical to the || form.
+                if ((unsigned)(rel0 - OFFX[e]) > (unsigned)window_left) *px = neg_inf_v;
+                if ((unsigned)(rel0 - OFFY[e]) > (unsigned)window_left) *py = neg_inf_v;
             }
         }
     }
@@ -496,7 +500,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     __builtin_amdgcn_sched_barrier(0); 
     if constexpr (causal) { 
         const int kv_end_pos = (1) * KV_BLOCK_SIZE;
-        if constexpr (is_swa) { const int ka = (0) + kv_off; mask_kv_tile_swa(att_block[0], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
+        if constexpr (is_swa) { const int ka = (0) + kv_off; if (swa_needs_mask(tile_idx, ka, causal_delta_rt, window_left)) mask_kv_tile_swa(att_block[0], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
         else if (__builtin_expect(q_start_pos < kv_end_pos, 0)) {  // Only mask if needed
             mask_kv_tile(att_block[0], tile_idx, 0, neg_inf_v, lane, causal_delta_rt);
         }
@@ -546,7 +550,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         // for the common case; only cross-attn pays.
         if constexpr (causal) {
             const int kv_end_pos_odd = (j - 1) * KV_BLOCK_SIZE;   // end of tile (j-2)
-            if constexpr (is_swa) { const int ka = (j - 2) + kv_off; mask_kv_tile_swa(att_block[1], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
+            if constexpr (is_swa) { const int ka = (j - 2) + kv_off; if (swa_needs_mask(tile_idx, ka, causal_delta_rt, window_left)) mask_kv_tile_swa(att_block[1], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
             else if (causal_delta_rt > 0 && q_start_pos < kv_end_pos_odd) {
                 mask_kv_tile(att_block[1], tile_idx, j - 2, neg_inf_v, lane, causal_delta_rt);
             }
@@ -648,7 +652,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
         load(v_reg, v_smem[1]);
         if constexpr (causal) {
             const int kv_end_pos = (j) * KV_BLOCK_SIZE;
-            if constexpr (is_swa) { const int ka = (j - 1) + kv_off; mask_kv_tile_swa(att_block[0], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
+            if constexpr (is_swa) { const int ka = (j - 1) + kv_off; if (swa_needs_mask(tile_idx, ka, causal_delta_rt, window_left)) mask_kv_tile_swa(att_block[0], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
             else if (q_start_pos < kv_end_pos) {  // Only mask if needed
                 mask_kv_tile(att_block[0], tile_idx, j - 1, neg_inf_v, lane, causal_delta_rt);
             }
@@ -734,7 +738,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     load(v_reg, v_smem[0]);
     if constexpr (causal) {
         const int kv_end_pos = (active_tiles - 2) * KV_BLOCK_SIZE;
-        if constexpr (is_swa) { const int ka = (active_tiles - 3) + kv_off; mask_kv_tile_swa(att_block[1], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
+        if constexpr (is_swa) { const int ka = (active_tiles - 3) + kv_off; if (swa_needs_mask(tile_idx, ka, causal_delta_rt, window_left)) mask_kv_tile_swa(att_block[1], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
         else if (__builtin_expect(q_start_pos < kv_end_pos, 0)) {  // Only mask if needed
             mask_kv_tile(att_block[1], tile_idx, active_tiles - 3, neg_inf_v, lane, causal_delta_rt);
         }
@@ -798,7 +802,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     load(v_reg, v_smem[1]);
     if constexpr (causal) {
         const int kv_end_pos = (active_tiles - 1) * KV_BLOCK_SIZE;
-        if constexpr (is_swa) { const int ka = (active_tiles - 2) + kv_off; mask_kv_tile_swa(att_block[0], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
+        if constexpr (is_swa) { const int ka = (active_tiles - 2) + kv_off; if (swa_needs_mask(tile_idx, ka, causal_delta_rt, window_left)) mask_kv_tile_swa(att_block[0], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
         else if (__builtin_expect(q_start_pos < kv_end_pos, 1)) {  // Only mask if needed
             mask_kv_tile(att_block[0], tile_idx, active_tiles - 2, neg_inf_v, lane, causal_delta_rt);
         }
@@ -861,7 +865,7 @@ __global__ void attend_ker(const attn_globals<D> g) {
     load(v_reg, v_smem[0]);
     if constexpr (causal) {
         const int kv_end_pos = (active_tiles) * KV_BLOCK_SIZE;
-        if constexpr (is_swa) { const int ka = (active_tiles - 1) + kv_off; mask_kv_tile_swa(att_block[1], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
+        if constexpr (is_swa) { const int ka = (active_tiles - 1) + kv_off; if (swa_needs_mask(tile_idx, ka, causal_delta_rt, window_left)) mask_kv_tile_swa(att_block[1], tile_idx, ka, neg_inf_v, lane, causal_delta_rt, window_left); }
         else if (__builtin_expect(q_start_pos < kv_end_pos, 1)) {  // Only mask if needed
             mask_kv_tile(att_block[1], tile_idx, active_tiles - 1, neg_inf_v, lane, causal_delta_rt);
         }
